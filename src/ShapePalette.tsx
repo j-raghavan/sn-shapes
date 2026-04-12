@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { View, Image, Text, Pressable, StyleSheet, ImageSourcePropType } from 'react-native';
-import { PluginCommAPI, PluginManager, PluginFileAPI } from 'sn-plugin-lib';
-import { SHAPES, Shape, ShapeId } from './shapes';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {View, Image, Text, Pressable, StyleSheet, ImageSourcePropType} from 'react-native';
+import {PluginCommAPI, PluginManager, PluginFileAPI} from 'sn-plugin-lib';
+import {SHAPES, Shape, ShapeId, PEN_DEFAULTS} from './shapes';
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -37,7 +37,7 @@ export const TEST_IDS = {
 } as const;
 
 export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
-  square: require('../assets/shapes/shape_square.png'),
+  rectangle: require('../assets/shapes/shape_square.png'),
   circle: require('../assets/shapes/shape_circle.png'),
   roundedRect: require('../assets/shapes/shape_roundedRect.png'),
   ellipse: require('../assets/shapes/shape_ellipse.png'),
@@ -69,8 +69,13 @@ async function resolvePageSize(): Promise<{ width: number; height: number }> {
 
 async function insertShape(shape: Shape, pageWidth: number, pageHeight: number): Promise<void> {
   const center = { x: pageWidth / 2, y: pageHeight / 2 };
-  const shapeSize = pageWidth * SHAPE_SIZE_RATIO;
-  const geometry = shape.build(center, shapeSize);
+
+  const params = Object.fromEntries(
+    shape.parameters.map(p => [p.id, p.defaultValue])
+  );
+
+  const geometry = shape.build(center, params, PEN_DEFAULTS);
+  
   const res = await PluginCommAPI.insertGeometry(geometry);
   if (!res?.success) {
     console.error('insertGeometry failed:', JSON.stringify(res));
@@ -105,7 +110,7 @@ export default function ShapePalette() {
     };
   }, []);
 
-  const layout = computeLayout(pageWidth);
+const layout = computeLayout(pageWidth);
 
   const handleShapeTap = useCallback(async (shape: Shape) => {
     if (insertingRef.current) {return;}

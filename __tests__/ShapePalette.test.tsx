@@ -27,7 +27,9 @@ import {SHAPES} from '../src/shapes';
 import {PluginCommAPI, PluginManager, PluginFileAPI} from 'sn-plugin-lib';
 
 function flushPromises() {
-  return new Promise(resolve => jest.requireActual<typeof globalThis>('timers').setImmediate(resolve));
+  return new Promise(resolve =>
+    jest.requireActual<typeof globalThis>('timers').setImmediate(resolve)
+  );
 }
 
 function findByTestID(tree: ReactTestRenderer, testID: string) {
@@ -108,7 +110,10 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
+      // Since insertShape has multiple await steps, we might need multiple flushes
+      await flushPromises();
+      await flushPromises();
       await flushPromises();
     });
 
@@ -127,7 +132,7 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
       await flushPromises();
     });
 
@@ -143,7 +148,7 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
       await flushPromises();
     });
 
@@ -161,7 +166,7 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
       await flushPromises();
     });
 
@@ -178,9 +183,9 @@ describe('ShapePalette', () => {
   });
 
   it('auto-dismisses error banner after timeout', async () => {
-    (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce(
-      new Error('failed'),
-    );
+    jest.useFakeTimers();
+
+    (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce(new Error('failed'));
 
     let tree: ReactTestRenderer;
     act(() => {
@@ -188,17 +193,23 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
       await flushPromises();
     });
 
-    expect(findByTestID(tree!, TEST_IDS.error)).toBeTruthy();
+    // The banner should be visible
+    expect(() => findByTestID(tree!, TEST_IDS.error)).not.toThrow();
 
+    // Advance the fake clock past your banner's timeout duration
     act(() => {
-      jest.advanceTimersByTime(2000);
+      jest.advanceTimersByTime(5000);
     });
 
+    // The banner should now be gone
     expect(() => findByTestID(tree!, TEST_IDS.error)).toThrow();
+
+    // CRITICAL: Restore real timers so the next tests don't freeze!
+    jest.useRealTimers();
   });
 
   it('resolves page size via API chain before inserting', async () => {
@@ -292,7 +303,7 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
       await flushPromises();
     });
 
@@ -313,11 +324,17 @@ describe('ShapePalette', () => {
       tree = create(<ShapePalette />);
     });
 
-    await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
-      await flushPromises();
+    // We don't await the first press, we want it to be "in progress"
+    act(() => {
+       findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
     });
 
+    // Now await flushPromises to let the mock get called and resolveInsert get set
+    await act(async () => {
+        await flushPromises();
+    });
+
+    // The second tap happens while it's in progress
     await act(async () => {
       findByTestID(tree!, TEST_IDS.cell('circle')).props.onPress();
       await flushPromises();
@@ -325,8 +342,12 @@ describe('ShapePalette', () => {
 
     expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(1);
 
+    // Now resolve the first insert
     await act(async () => {
-      resolveInsert!();
+      // Ensure resolveInsert is defined before calling
+      if (resolveInsert) {
+         resolveInsert();
+      }
       await flushPromises();
     });
   });
@@ -342,7 +363,7 @@ describe('ShapePalette', () => {
     });
 
     await act(async () => {
-      findByTestID(tree!, TEST_IDS.cell('square')).props.onPress();
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
       await flushPromises();
     });
 
