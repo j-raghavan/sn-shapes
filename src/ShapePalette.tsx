@@ -51,12 +51,26 @@ export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
   parallelogram: require('../assets/shapes/shape_parallelogram.png'),
 };
 
+// Local narrow types for sn-plugin-lib responses. The SDK declares these
+// methods as returning the generic `Object` type, so TS doesn't know
+// about the `{success, result}` envelope the firmware actually returns.
+// Keep these types in sync with sn-plugin-lib if the envelope changes.
+type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | null | undefined;
+
 async function resolvePageSize(): Promise<{ width: number; height: number }> {
   try {
-    const pathRes = await PluginCommAPI.getCurrentFilePath();
-    const pageRes = await PluginCommAPI.getCurrentPageNum();
-    if (pathRes?.success && pageRes?.success) {
-      const sizeRes = await PluginFileAPI.getPageSize(pathRes.result, pageRes.result);
+    const pathRes = (await PluginCommAPI.getCurrentFilePath()) as ApiRes<string>;
+    const pageRes = (await PluginCommAPI.getCurrentPageNum()) as ApiRes<number>;
+    if (
+      pathRes?.success &&
+      pageRes?.success &&
+      typeof pathRes.result === 'string' &&
+      typeof pageRes.result === 'number'
+    ) {
+      const sizeRes = (await PluginFileAPI.getPageSize(
+        pathRes.result,
+        pageRes.result,
+      )) as ApiRes<{width: number; height: number}>;
       if (sizeRes?.success && sizeRes.result) {
         return sizeRes.result;
       }
