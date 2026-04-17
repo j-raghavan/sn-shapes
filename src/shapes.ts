@@ -6,12 +6,26 @@ export type PenStyle = {
   penWidth: number;
 };
 
-export type PolygonGeometry = PenStyle & {
+/**
+ * Flags common to all Geometry variants but independent of the shape's
+ * visual definition. Kept separate from PenStyle so shape builders don't
+ * need to think about them.
+ *
+ * showLassoAfterInsert: when true, sn-plugin-lib's insertGeometry will
+ *   automatically activate the lasso selection on the inserted shape.
+ *   Backed by the field of the same name on the library's Geometry class
+ *   (see node_modules/sn-plugin-lib/src/model/Element.ts).
+ */
+export type GeometryFlags = {
+  showLassoAfterInsert?: boolean;
+};
+
+export type PolygonGeometry = PenStyle & GeometryFlags & {
   type: 'GEO_polygon';
   points: Point[];
 };
 
-export type CircleGeometry = PenStyle & {
+export type CircleGeometry = PenStyle & GeometryFlags & {
   type: 'GEO_circle';
   ellipseCenterPoint: Point;
   ellipseMajorAxisRadius: number;
@@ -19,7 +33,7 @@ export type CircleGeometry = PenStyle & {
   ellipseAngle: number;
 };
 
-export type EllipseGeometry = PenStyle & {
+export type EllipseGeometry = PenStyle & GeometryFlags & {
   type: 'GEO_ellipse';
   ellipseCenterPoint: Point;
   ellipseMajorAxisRadius: number;
@@ -27,7 +41,7 @@ export type EllipseGeometry = PenStyle & {
   ellipseAngle: number;
 };
 
-export type LineGeometry = PenStyle & {
+export type LineGeometry = PenStyle & GeometryFlags & {
   type: 'straightLine';
   points: Point[];
 };

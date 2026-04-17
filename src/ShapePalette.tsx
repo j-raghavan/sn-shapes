@@ -75,7 +75,15 @@ async function insertShape(shape: Shape, pageWidth: number, pageHeight: number):
   );
 
   const geometry = shape.build(center, params, PEN_DEFAULTS);
-  
+  // Ask sn-plugin-lib / host firmware to auto-activate the lasso on the
+  // inserted shape so the user can immediately move, resize, or style it
+  // without re-entering lasso mode. Verified end-to-end on Chauvet 3.27.41
+  // (logcat 2026-04-16T18:29:29 showed `setLassoDate: jniLassoInfo ...
+  // geometrycircle=1` and `AreaSelectionView: getVisibility: 0 isClose
+  // false` firing automatically after insertGeometry). See GeometryFlags
+  // in ./shapes.
+  geometry.showLassoAfterInsert = true;
+
   const res = await PluginCommAPI.insertGeometry(geometry);
   if (!res?.success) {
     console.error('insertGeometry failed:', JSON.stringify(res));

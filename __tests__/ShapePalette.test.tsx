@@ -266,6 +266,40 @@ describe('ShapePalette', () => {
     expect(geo.ellipseMajorAxisRadius).toBe(geo.ellipseMinorAxisRadius);
   });
 
+  it('sets showLassoAfterInsert on the geometry so the host auto-lassoes the inserted shape', async () => {
+    let tree: ReactTestRenderer;
+    act(() => {
+      tree = create(<ShapePalette />);
+    });
+
+    await act(async () => {
+      findByTestID(tree!, TEST_IDS.cell('rectangle')).props.onPress();
+      await flushPromises();
+    });
+
+    const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+    expect(geo.showLassoAfterInsert).toBe(true);
+  });
+
+  it('auto-lasso flag is set for every shape in the palette', async () => {
+    for (const shape of SHAPES) {
+      (PluginCommAPI.insertGeometry as jest.Mock).mockClear();
+
+      let tree: ReactTestRenderer;
+      act(() => {
+        tree = create(<ShapePalette />);
+      });
+
+      await act(async () => {
+        findByTestID(tree!, TEST_IDS.cell(shape.id)).props.onPress();
+        await flushPromises();
+      });
+
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(geo.showLassoAfterInsert).toBe(true);
+    }
+  });
+
   it('falls back to defaults when getCurrentFilePath fails', async () => {
     (PluginCommAPI.getCurrentFilePath as jest.Mock).mockRejectedValueOnce(
       new Error('unavailable'),
