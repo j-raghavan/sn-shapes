@@ -10,15 +10,21 @@
  *      current geometry (firmware keeps the lasso selection active while
  *      the plugin runs, confirmed via logcat line 28760 sendMenuItemEvent).
  *   3. Renders three action groups — Stroke Width, Stroke Color, Delete.
- *      Picking width or color calls modifyLassoGeometry with the full
- *      geometry (GeometrySchema requires penColor/penType/penWidth/type).
- *      Tapping Delete calls deleteLassoElements().
- *   4. After any action completes (or fails with no retry value), closes
- *      the plugin view via PluginManager.closePluginView().
+ *      Width/color taps update a local "pending patch" instead of firing
+ *      modifyLassoGeometry immediately — that way the user can adjust both
+ *      properties in one session (matching the BOOX e-ink shape panel UX).
+ *      Tapping the overlay (outside the popup) or the ✕ close button
+ *      commits the pending patch via modifyLassoGeometry and closes.
+ *      Tapping Delete calls deleteLassoElements() immediately (destructive
+ *      actions bypass deferred-apply).
+ *   4. On modify/delete success the plugin view is closed via
+ *      PluginManager.closePluginView(). On error the banner shows and the
+ *      panel stays open so the user can retry or change selection.
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {View, Text, Pressable, StyleSheet} from 'react-native';
 import {PluginCommAPI, PluginManager} from 'sn-plugin-lib';
+import {bakeLassoResize, Rect} from './lassoTransform';
 
 export const TEST_IDS = {
   overlay: 'shape-options-overlay',
@@ -93,16 +99,54 @@ async function readFirstLassoGeometry(): Promise<Geometry | null> {
   }
 }
 
+/**
+ * Reads the current lasso box bounds. The lasso rect is the "visual" size
+ * the user sees after any native resize gesture, and differs from the
+ * geometry's own stored coordinates when a resize is pending. Returns null
+ * on any API or shape failure — callers should fall back to modifying
+ * without a resize bake (i.e. v1.0.1 behavior).
+ */
+async function readLassoRect(): Promise<Rect | null> {
+  try {
+    const res = (await PluginCommAPI.getLassoRect()) as
+      | {success: boolean; result?: unknown}
+      | null
+      | undefined;
+    if (!res?.success) {return null;}
+    const r = res.result as Partial<Rect> | null | undefined;
+    if (
+      !r ||
+      typeof r.left !== 'number' ||
+      typeof r.right !== 'number' ||
+      typeof r.top !== 'number' ||
+      typeof r.bottom !== 'number'
+    ) {
+      return null;
+    }
+    return {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+  } catch (e) {
+    console.error('[ShapeOptionsPanel] getLassoRect failed:', e);
+    return null;
+  }
+}
+
+type PendingPatch = Partial<Pick<Geometry, 'penWidth' | 'penColor'>>;
+
 export default function ShapeOptionsPanel() {
   const [geometry, setGeometry] = useState<Geometry | null>(null);
+  const [lassoRect, setLassoRect] = useState<Rect | null>(null);
+  const [pendingPatch, setPendingPatch] = useState<PendingPatch>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    readFirstLassoGeometry().then(g => {
+    // Read geometry and lasso rect in parallel. Either can be null; we
+    // tolerate missing rect by just not baking (falls back to v1.0.1).
+    Promise.all([readFirstLassoGeometry(), readLassoRect()]).then(([g, r]) => {
       setGeometry(g);
+      setLassoRect(r);
       setLoading(false);
     });
     return () => {
@@ -116,34 +160,82 @@ export default function ShapeOptionsPanel() {
     errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
   }, []);
 
-  const close = useCallback(() => {
-    PluginManager.closePluginView();
+  // Effective values shown as "selected" in the UI. Unset fields fall back
+  // to the geometry's current value so the initial render mirrors the
+  // shape's actual state.
+  const effectiveWidth = pendingPatch.penWidth ?? geometry?.penWidth;
+  const effectiveColor = pendingPatch.penColor ?? geometry?.penColor;
+
+  /**
+   * Filter the pending patch to only fields that actually differ from the
+   * geometry. Avoids sending a no-op modifyLassoGeometry just because the
+   * user re-tapped the already-selected option.
+   */
+  const computeRealChanges = useCallback(
+    (g: Geometry, patch: PendingPatch): PendingPatch => {
+      const out: PendingPatch = {};
+      if (patch.penWidth != null && patch.penWidth !== g.penWidth) {
+        out.penWidth = patch.penWidth;
+      }
+      if (patch.penColor != null && patch.penColor !== g.penColor) {
+        out.penColor = patch.penColor;
+      }
+      return out;
+    },
+    [],
+  );
+
+  const commitAndClose = useCallback(async () => {
+    if (busyRef.current) {return;}
+    // Nothing loaded yet (still in loading state) — just close.
+    if (!geometry) {
+      PluginManager.closePluginView();
+      return;
+    }
+    const realChanges = computeRealChanges(geometry as Geometry, pendingPatch);
+    if (Object.keys(realChanges).length === 0) {
+      // No real changes — close without calling modify.
+      PluginManager.closePluginView();
+      return;
+    }
+    busyRef.current = true;
+    setError(null);
+    try {
+      // Bake any pending lasso-resize into the geometry's own coordinates
+      // BEFORE merging the pen patch. Without this, modifyLassoGeometry
+      // sees the stored (pre-resize) geometry and the firmware discards
+      // the user's resize, snapping the shape back to its insert-time
+      // size. `bakeLassoResize` is a no-op when lassoRect is null, when it
+      // matches the natural bounds within the penWidth-aware tolerance, or
+      // when the geometry type is unknown — so this is safe on devices or
+      // flows where the rect API isn't available.
+      const baked = bakeLassoResize(geometry as Geometry, lassoRect);
+      const merged: Geometry = {...baked, ...realChanges};
+      const res = await PluginCommAPI.modifyLassoGeometry(merged);
+      const success =
+        res != null && typeof res === 'object' && (res as any).success === true;
+      if (!success) {
+        const msg = (res as any)?.error?.message ?? 'Modify failed';
+        showError(msg);
+        return;
+      }
+      PluginManager.closePluginView();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Modify failed');
+    } finally {
+      busyRef.current = false;
+    }
+  }, [geometry, lassoRect, pendingPatch, computeRealChanges, showError]);
+
+  const handleWidthPress = useCallback((value: number) => {
+    if (busyRef.current) {return;}
+    setPendingPatch(prev => ({...prev, penWidth: value}));
   }, []);
 
-  const applyPatch = useCallback(
-    async (patch: Partial<Pick<Geometry, 'penWidth' | 'penColor'>>) => {
-      if (busyRef.current || !geometry) {return;}
-      busyRef.current = true;
-      setError(null);
-      try {
-        const merged: Geometry = {...geometry, ...patch};
-        const res = await PluginCommAPI.modifyLassoGeometry(merged);
-        const success =
-          res != null && typeof res === 'object' && (res as any).success === true;
-        if (!success) {
-          const msg = (res as any)?.error?.message ?? 'Modify failed';
-          showError(msg);
-          return;
-        }
-        close();
-      } catch (e) {
-        showError(e instanceof Error ? e.message : 'Modify failed');
-      } finally {
-        busyRef.current = false;
-      }
-    },
-    [geometry, close, showError],
-  );
+  const handleColorPress = useCallback((value: number) => {
+    if (busyRef.current) {return;}
+    setPendingPatch(prev => ({...prev, penColor: value}));
+  }, []);
 
   const handleDelete = useCallback(async () => {
     if (busyRef.current) {return;}
@@ -158,17 +250,16 @@ export default function ShapeOptionsPanel() {
         showError(msg);
         return;
       }
-      close();
+      PluginManager.closePluginView();
     } catch (e) {
       showError(e instanceof Error ? e.message : 'Delete failed');
     } finally {
       busyRef.current = false;
     }
-  }, [close, showError]);
+  }, [showError]);
 
-  const handleOverlayPress = useCallback(() => {
-    if (!busyRef.current) {close();}
-  }, [close]);
+  const handleOverlayPress = commitAndClose;
+  const close = commitAndClose;
 
   return (
     <Pressable testID={TEST_IDS.overlay} style={styles.container} onPress={handleOverlayPress}>
@@ -206,12 +297,12 @@ export default function ShapeOptionsPanel() {
             <Text style={styles.sectionLabel}>Stroke Width</Text>
             <View style={styles.row}>
               {WIDTH_PRESETS.map(p => {
-                const selected = geometry.penWidth === p.value;
+                const selected = effectiveWidth === p.value;
                 return (
                   <Pressable
                     key={p.value}
                     testID={TEST_IDS.widthButton(p.value)}
-                    onPress={() => applyPatch({penWidth: p.value})}
+                    onPress={() => handleWidthPress(p.value)}
                     style={({pressed}) => [
                       styles.widthBtn,
                       selected && styles.widthBtnSelected,
@@ -234,12 +325,12 @@ export default function ShapeOptionsPanel() {
             <Text style={styles.sectionLabel}>Stroke Color</Text>
             <View style={styles.row}>
               {COLOR_PRESETS.map(c => {
-                const selected = geometry.penColor === c.value;
+                const selected = effectiveColor === c.value;
                 return (
                   <Pressable
                     key={c.value}
                     testID={TEST_IDS.colorButton(c.value)}
-                    onPress={() => applyPatch({penColor: c.value})}
+                    onPress={() => handleColorPress(c.value)}
                     style={({pressed}) => [
                       styles.colorBtn,
                       selected && styles.colorBtnSelected,

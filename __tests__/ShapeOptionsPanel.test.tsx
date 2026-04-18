@@ -2,11 +2,13 @@
  * Tests for src/ShapeOptionsPanel. Validates:
  *   - Loading state → empty state when no lasso selection
  *   - Populates current geometry via getLassoGeometries
- *   - Width picker sends merged geometry with new penWidth
- *   - Color picker sends merged geometry with new penColor
- *   - Delete calls deleteLassoElements and closes plugin view
- *   - Overlay tap closes without side-effects
+ *   - Width/color taps update pending patch state only (no immediate modify)
+ *   - Overlay tap commits pending patch via modifyLassoGeometry and closes
+ *   - Pending patch survives across multiple taps in one session
+ *   - Re-tapping an already-applied value does NOT produce a no-op modify
+ *   - Delete calls deleteLassoElements immediately and closes plugin view
  *   - API failures surface via error banner and do NOT close
+ *   - Lasso-resize delta is baked at commit time
  */
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
@@ -22,11 +24,18 @@ const DEFAULT_GEOMETRY = {
   ellipseAngle: 0,
 };
 
+// Natural bounds for DEFAULT_GEOMETRY (circle at 500,500 r=100, θ=0):
+// left/right/top/bottom = 400/600/400/600.
+const DEFAULT_LASSO_RECT = {left: 400, top: 400, right: 600, bottom: 600};
+
 jest.mock('sn-plugin-lib', () => ({
   PluginCommAPI: {
     getLassoGeometries: jest
       .fn()
       .mockResolvedValue({success: true, result: [DEFAULT_GEOMETRY]}),
+    getLassoRect: jest
+      .fn()
+      .mockResolvedValue({success: true, result: DEFAULT_LASSO_RECT}),
     modifyLassoGeometry: jest.fn().mockResolvedValue({success: true}),
     deleteLassoElements: jest.fn().mockResolvedValue({success: true}),
   },
@@ -59,6 +68,9 @@ beforeEach(() => {
   (PluginCommAPI.getLassoGeometries as jest.Mock)
     .mockClear()
     .mockResolvedValue({success: true, result: [DEFAULT_GEOMETRY]});
+  (PluginCommAPI.getLassoRect as jest.Mock)
+    .mockClear()
+    .mockResolvedValue({success: true, result: DEFAULT_LASSO_RECT});
   (PluginCommAPI.modifyLassoGeometry as jest.Mock)
     .mockClear()
     .mockResolvedValue({success: true});
@@ -139,16 +151,50 @@ describe('ShapeOptionsPanel', () => {
     }
   });
 
-  it('sends modifyLassoGeometry with merged penWidth when a width preset is tapped', async () => {
-    const tree = await renderAndLoad();
-    const target = WIDTH_PRESETS[0].value; // XS
+  // ---- Deferred-apply: taps update pending state, overlay commits ---
+
+  async function tapAndCommit(
+    tree: ReactTestRenderer,
+    taps: Array<() => void>,
+  ) {
     await act(async () => {
-      findByTestID(tree, TEST_IDS.widthButton(target)).props.onPress();
+      for (const t of taps) {t();}
       await flushPromises();
     });
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+      await flushPromises();
+    });
+  }
+
+  it('tapping a width preset alone does NOT call modifyLassoGeometry', async () => {
+    const tree = await renderAndLoad();
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress();
+      await flushPromises();
+    });
+    expect(PluginCommAPI.modifyLassoGeometry).not.toHaveBeenCalled();
+    expect(PluginManager.closePluginView).not.toHaveBeenCalled();
+  });
+
+  it('tapping a color preset alone does NOT call modifyLassoGeometry', async () => {
+    const tree = await renderAndLoad();
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.colorButton(COLOR_PRESETS[1].value)).props.onPress();
+      await flushPromises();
+    });
+    expect(PluginCommAPI.modifyLassoGeometry).not.toHaveBeenCalled();
+    expect(PluginManager.closePluginView).not.toHaveBeenCalled();
+  });
+
+  it('sends modifyLassoGeometry with new penWidth when outside is tapped after a width pick', async () => {
+    const tree = await renderAndLoad();
+    const target = WIDTH_PRESETS[0].value;
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(target)).props.onPress(),
+    ]);
     expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
     const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
-    // Merged result: retains original type/penColor/penType and swaps penWidth.
     expect(arg.type).toBe(DEFAULT_GEOMETRY.type);
     expect(arg.penColor).toBe(DEFAULT_GEOMETRY.penColor);
     expect(arg.penType).toBe(DEFAULT_GEOMETRY.penType);
@@ -156,13 +202,12 @@ describe('ShapeOptionsPanel', () => {
     expect(PluginManager.closePluginView).toHaveBeenCalled();
   });
 
-  it('sends modifyLassoGeometry with merged penColor when a color preset is tapped', async () => {
+  it('sends modifyLassoGeometry with new penColor when outside is tapped after a color pick', async () => {
     const tree = await renderAndLoad();
-    const target = COLOR_PRESETS[1].value; // Gray
-    await act(async () => {
-      findByTestID(tree, TEST_IDS.colorButton(target)).props.onPress();
-      await flushPromises();
-    });
+    const target = COLOR_PRESETS[1].value;
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.colorButton(target)).props.onPress(),
+    ]);
     expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
     const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
     expect(arg.penColor).toBe(target);
@@ -171,29 +216,72 @@ describe('ShapeOptionsPanel', () => {
     expect(PluginManager.closePluginView).toHaveBeenCalled();
   });
 
-  it('preserves all non-pen geometry fields when patching', async () => {
+  it('commits BOTH width and color in a single modify when picked together', async () => {
     const tree = await renderAndLoad();
-    await act(async () => {
-      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[3].value)).props.onPress();
-      await flushPromises();
-    });
+    const w = WIDTH_PRESETS[4].value; // XL
+    const c = COLOR_PRESETS[2].value; // Light
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(w)).props.onPress(),
+      () => findByTestID(tree, TEST_IDS.colorButton(c)).props.onPress(),
+    ]);
+    expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.penWidth).toBe(w);
+    expect(arg.penColor).toBe(c);
+    expect(PluginManager.closePluginView).toHaveBeenCalled();
+  });
+
+  it('last width pick wins when the user changes their mind before committing', async () => {
+    const tree = await renderAndLoad();
+    const first = WIDTH_PRESETS[0].value;
+    const second = WIDTH_PRESETS[3].value;
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(first)).props.onPress(),
+      () => findByTestID(tree, TEST_IDS.widthButton(second)).props.onPress(),
+    ]);
+    expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.penWidth).toBe(second);
+  });
+
+  it('preserves all non-pen geometry fields when committing', async () => {
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[3].value)).props.onPress(),
+    ]);
     const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
     expect(arg.ellipseCenterPoint).toEqual(DEFAULT_GEOMETRY.ellipseCenterPoint);
     expect(arg.ellipseMajorAxisRadius).toBe(DEFAULT_GEOMETRY.ellipseMajorAxisRadius);
     expect(arg.ellipseAngle).toBe(DEFAULT_GEOMETRY.ellipseAngle);
   });
 
-  it('calls deleteLassoElements and closes when Delete is tapped', async () => {
+  it('re-tapping the value the shape already has does NOT trigger a modify on commit', async () => {
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      // DEFAULT_GEOMETRY already has penWidth=400 and penColor=0x00 —
+      // tapping them again is a no-op.
+      () => findByTestID(tree, TEST_IDS.widthButton(DEFAULT_GEOMETRY.penWidth)).props.onPress(),
+      () => findByTestID(tree, TEST_IDS.colorButton(DEFAULT_GEOMETRY.penColor)).props.onPress(),
+    ]);
+    expect(PluginCommAPI.modifyLassoGeometry).not.toHaveBeenCalled();
+    // But the panel still closes.
+    expect(PluginManager.closePluginView).toHaveBeenCalled();
+  });
+
+  it('calls deleteLassoElements and closes when Delete is tapped (pending patch is discarded)', async () => {
     const tree = await renderAndLoad();
     await act(async () => {
+      // Build up a pending patch that should NOT be applied once we delete.
+      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress();
       findByTestID(tree, TEST_IDS.delete).props.onPress();
       await flushPromises();
     });
     expect(PluginCommAPI.deleteLassoElements).toHaveBeenCalledTimes(1);
+    expect(PluginCommAPI.modifyLassoGeometry).not.toHaveBeenCalled();
     expect(PluginManager.closePluginView).toHaveBeenCalled();
   });
 
-  it('closes plugin view when the overlay is tapped', async () => {
+  it('closes plugin view when the overlay is tapped with no changes (no modify call)', async () => {
     const tree = await renderAndLoad();
     await act(async () => {
       findByTestID(tree, TEST_IDS.overlay).props.onPress();
@@ -210,10 +298,9 @@ describe('ShapeOptionsPanel', () => {
       error: {code: 4, message: 'host rejected'},
     });
     const tree = await renderAndLoad();
-    await act(async () => {
-      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress();
-      await flushPromises();
-    });
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress(),
+    ]);
     expect(() => findByTestID(tree, TEST_IDS.error)).not.toThrow();
     expect(PluginManager.closePluginView).not.toHaveBeenCalled();
   });
@@ -223,10 +310,9 @@ describe('ShapeOptionsPanel', () => {
       new Error('bridge blew up'),
     );
     const tree = await renderAndLoad();
-    await act(async () => {
-      findByTestID(tree, TEST_IDS.colorButton(COLOR_PRESETS[0].value)).props.onPress();
-      await flushPromises();
-    });
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.colorButton(COLOR_PRESETS[1].value)).props.onPress(),
+    ]);
     expect(() => findByTestID(tree, TEST_IDS.error)).not.toThrow();
     expect(PluginManager.closePluginView).not.toHaveBeenCalled();
   });
@@ -251,10 +337,9 @@ describe('ShapeOptionsPanel', () => {
       error: {code: 4, message: 'host rejected'},
     });
     const tree = await renderAndLoad();
-    await act(async () => {
-      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress();
-      await flushPromises();
-    });
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress(),
+    ]);
     expect(() => findByTestID(tree, TEST_IDS.error)).not.toThrow();
     act(() => {
       jest.advanceTimersByTime(5000);
@@ -262,18 +347,85 @@ describe('ShapeOptionsPanel', () => {
     expect(() => findByTestID(tree, TEST_IDS.error)).toThrow();
   });
 
-  it('ignores rapid second tap while a modify is in flight', async () => {
+  // ---- v1.0.2: preserve lasso resize when modifying ------------------
+
+  it('reads the lasso rect on mount', async () => {
+    await renderAndLoad();
+    expect(PluginCommAPI.getLassoRect).toHaveBeenCalledTimes(1);
+  });
+
+  it('bakes the lasso-resize delta into the geometry before modify', async () => {
+    // Simulate the user having dragged the lasso to 2x size: natural bounds
+    // for DEFAULT_GEOMETRY are 400..600, but lasso is now 300..700.
+    (PluginCommAPI.getLassoRect as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      result: {left: 300, top: 300, right: 700, bottom: 700},
+    });
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.colorButton(COLOR_PRESETS[1].value)).props.onPress(),
+    ]);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    // Radii should have been scaled 2x (100 → 200), center unchanged at 500,500.
+    expect(arg.ellipseMajorAxisRadius).toBe(200);
+    expect(arg.ellipseMinorAxisRadius).toBe(200);
+    expect(arg.ellipseCenterPoint).toEqual({x: 500, y: 500});
+    // Pen patch still applied on top of the baked geometry.
+    expect(arg.penColor).toBe(COLOR_PRESETS[1].value);
+  });
+
+  it('does not bake when lasso rect matches natural bounds (no user resize)', async () => {
+    // Default mock already returns matching rect; confirm no-op.
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress(),
+    ]);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.ellipseMajorAxisRadius).toBe(DEFAULT_GEOMETRY.ellipseMajorAxisRadius);
+    expect(arg.ellipseMinorAxisRadius).toBe(DEFAULT_GEOMETRY.ellipseMinorAxisRadius);
+    expect(arg.ellipseCenterPoint).toEqual(DEFAULT_GEOMETRY.ellipseCenterPoint);
+  });
+
+  it('falls back to un-baked modify when getLassoRect fails', async () => {
+    (PluginCommAPI.getLassoRect as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      error: {code: 1, message: 'unavailable'},
+    });
+    const tree = await renderAndLoad();
+    // Pick a width that actually differs from the default so commit fires.
+    const target = WIDTH_PRESETS[0].value; // XS, != default M
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(target)).props.onPress(),
+    ]);
+    // Without a valid rect we send the original geometry with just the
+    // pen patch — v1.0.1 behavior, no crash.
+    expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.ellipseMajorAxisRadius).toBe(DEFAULT_GEOMETRY.ellipseMajorAxisRadius);
+    expect(arg.penWidth).toBe(target);
+  });
+
+  // --------------------------------------------------------------------
+
+  it('ignores a second commit attempt while a modify is in flight', async () => {
     let resolveModify: ((value: unknown) => void) | null = null;
     (PluginCommAPI.modifyLassoGeometry as jest.Mock).mockImplementationOnce(
       () => new Promise(r => { resolveModify = r; }),
     );
     const tree = await renderAndLoad();
-    act(() => {
+    // Stage a pending change first so that commit triggers a modify.
+    await act(async () => {
       findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress();
+      await flushPromises();
+    });
+    // First overlay tap kicks off modify and blocks on it.
+    act(() => {
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
     });
     await act(async () => { await flushPromises(); });
+    // Second overlay tap must be ignored while modify is still in flight.
     await act(async () => {
-      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[1].value)).props.onPress();
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
       await flushPromises();
     });
     expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
