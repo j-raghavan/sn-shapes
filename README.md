@@ -11,7 +11,7 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 
 ## Demo
 
-<video src="https://github.com/j-raghavan/sn-shapes/raw/master/assets/demo/sn-shapes-v1.0.3-demo.mp4" controls muted playsinline width="720"></video>
+<video src="https://github.com/user-attachments/assets/298211f3-0039-4edd-aee5-6f1259272cc2" controls muted playsinline width="720"></video>
 
 ## What's New in v1.0.3
 
@@ -70,7 +70,6 @@ src/
 assets/
   icon.png           Toolbar icon
   shapes/            Shape thumbnail images
-  demo/              Demo video for the README
 index.js             Plugin entry point (toolbar button registration)
 App.tsx              React Native root component
 ```
