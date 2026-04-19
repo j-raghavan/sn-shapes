@@ -1,41 +1,124 @@
-import React, {useCallback, useEffect, useRef, useState} from 'react';
-import {View, Image, Text, Pressable, StyleSheet, ImageSourcePropType} from 'react-native';
+/**
+ * ShapePalette — the only "Shapes" popup (toolbar button id=100).
+ *
+ * Hybrid-grid design (2026-04-18 revision):
+ *   Row 1: Shapes grid (left) + Preview (right)              — two-col
+ *   Row 2: Stroke Width (5 presets: XS / S / M / L / XL)     — full width
+ *   Row 3: Stroke Color (5 grey levels)                       — full width
+ *
+ * Pen Type is intentionally NOT a row here — it's a top-level selection
+ * in the firmware's main drawing surface (left-sidebar pen stack), so
+ * duplicating it would add a decision without giving the user anything
+ * they couldn't set outside. Inserted geometries carry the default
+ * penType (Fineliner); users can swap pens in the main UI before the
+ * shape is drawn, or re-style after the shape auto-lassos post-insert.
+ *
+ * The earlier two-column design put the pickers below the shapes in the
+ * left column, which left the right column with a large expanse of empty
+ * space below the preview. The hybrid grid keeps the "what will it look
+ * like" preview visible next to the shape choice (the two decisions that
+ * want to be considered together) while letting the pickers span the full
+ * panel width for comfortable tap targets.
+ *
+ * Commit flow — NO explicit Insert button:
+ *   1. Tapping a shape cell selects it (no insert yet).
+ *   2. Tapping a picker option mutates a local pendingStyle — the
+ *      relevant picker cell highlights and the preview updates.
+ *   3. Tapping OUTSIDE the panel (the overlay) commits: builds the
+ *      Geometry with the chosen style and inserts via
+ *      PluginCommAPI.insertGeometry. On success the popup closes; on
+ *      failure an error banner appears and the popup stays open so the
+ *      user can retry or edit their choices. The ✕ button in the header
+ *      remains the explicit "cancel without inserting" affordance.
+ *   4. Dropping the Insert button is user-driven (2026-04-18): once the
+ *      popup only exists for picking + one-shot inserting, an explicit
+ *      button is redundant — "tap outside to commit" reads as "I'm done"
+ *      which is exactly the one thing the user can do.
+ *
+ * Why a single popup (no separate Shape Options dialog):
+ *   - Earlier prototype had two popups: Shapes (id=100) for picking +
+ *     inserting, and Shape Options (id=200, lasso-toolbar contextual)
+ *     for re-styling a lassoed shape.
+ *   - Once this popup grew to host width/colour/pen-type pickers, the
+ *     contextual Shape Options panel became redundant — every option it
+ *     offered was already set at insert time. Per user direction
+ *     2026-04-18, the id=200 button + ShapeOptionsPanel routing were
+ *     removed; this popup is now the only entry point for shapes.
+ *   - ShapeOptionsPanel.tsx itself is kept on disk because it owns the
+ *     WIDTH_PRESETS / COLOR_PRESETS / PEN_TYPE_PRESETS constants and
+ *     helper utilities that this popup imports. The component export is
+ *     no longer rendered anywhere; only its constants are used.
+ *
+ * Why deferred-apply (instead of tap-to-insert + style after):
+ *   - Firmware bug: modifyLassoGeometry silently drops pen props in
+ *     Chauvet 3.27.41 (see prior diagnosis). The reliable path is to
+ *     bake the desired style into the Geometry at insert time, since
+ *     insertGeometry DOES honour pen props.
+ */
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {
+  View,
+  Image,
+  Text,
+  Pressable,
+  StyleSheet,
+  ImageSourcePropType,
+  ScrollView,
+} from 'react-native';
 import {PluginCommAPI, PluginManager, PluginFileAPI} from 'sn-plugin-lib';
-import {SHAPES, Shape, ShapeId, PEN_DEFAULTS} from './shapes';
+import {SHAPES, Shape, ShapeId, PenStyle, PEN_DEFAULTS} from './shapes';
+import {
+  WIDTH_PRESETS,
+  COLOR_PRESETS,
+  isAcceptablePenWidth,
+} from './ShapeOptionsPanel';
+import StrokePreview from './StrokePreview';
+
+// 2026-04-18 design change: the Pen Type picker is intentionally NOT
+// rendered here. Pen type is already a top-level selection in the
+// firmware's main drawing surface (the left-sidebar pen stack), so
+// duplicating it inside the Shapes popup just adds another decision
+// without giving the user anything they couldn't set outside. The
+// inserted geometry still carries PEN_DEFAULTS.penType so the firmware
+// accepts it — users who want a different pen on their shape can swap
+// pens in the main UI before drawing or re-style via the pen picker
+// after the shape lassos.
 
 // ---------------------------------------------------------------------------
-// Layout constants
+// Types & constants
 // ---------------------------------------------------------------------------
-const COLS = 4;
-
-// Panel width matches Supernote's native system popup width (~670px on Manta
-// 1920px wide, proportionally ~490px on Nomad 1404px wide).
-const PANEL_WIDTH_RATIO = 0.20;
-
-// Fixed spacing — these don't need to scale, they just need to look right.
-// Cell size is derived so the grid always fills the panel edge-to-edge.
-const PANEL_PADDING = 10;
-const CELL_GAP = 6;
-
-function computeLayout(pageWidth: number) {
-  const panelWidth = Math.round(pageWidth * PANEL_WIDTH_RATIO);
-  // Cell fills whatever width remains after padding and gaps are accounted for.
-  const cell = Math.floor((panelWidth - PANEL_PADDING * 2 - CELL_GAP * (COLS - 1)) / COLS);
-  // Thumbnail is 75% of cell — comfortable margin inside each cell.
-  const thumbnail = Math.round(cell * 0.75);
-  return { cell, gap: CELL_GAP, padding: PANEL_PADDING, thumbnail, panelWidth };
-}
 
 export const DEFAULT_PAGE_WIDTH = 1404;
 export const DEFAULT_PAGE_HEIGHT = 1872;
-export const SHAPE_SIZE_RATIO = 0.12;
 
 export const TEST_IDS = {
   overlay: 'shapes-overlay',
   cell: (id: ShapeId) => `shape-cell-${id}`,
+  widthButton: (w: number) => `shapes-width-${w}`,
+  colorButton: (c: number) => `shapes-color-${c}`,
   error: 'shapes-error',
+  // Explicit "cancel without inserting" affordance in the header. The
+  // overlay tap commits; the ✕ button cancels. Distinct testID so tests
+  // can exercise the cancel path without heuristically walking the tree.
+  closeButton: 'shapes-close-button',
+  // Row 1 columns — tests use these to verify the grid + preview layout.
+  shapesColumn: 'shapes-shapes-column',
+  previewColumn: 'shapes-preview-column',
+  // Full-width rows below Row 1. The Pen Type row was dropped 2026-04-18;
+  // see file header for rationale.
+  widthRow: 'shapes-width-row',
+  colorRow: 'shapes-color-row',
 } as const;
 
+/**
+ * PNG icon for each shape. Authored at ~48 px native; the cell renders
+ * them at THUMBNAIL_SIZE so they stay within their authoring resolution
+ * and don't alias on e-ink. SHAPES and SHAPE_ICONS must stay in sync —
+ * this is `Record<ShapeId, ...>` (not Partial) so TypeScript flags any
+ * shape that's missing an icon. The StrokePreview on the right column
+ * reuses the same icons (tinted with pen colour) so the preview mirrors
+ * the grid selection exactly.
+ */
 export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
   rectangle: require('../assets/shapes/shape_square.png'),
   circle: require('../assets/shapes/shape_circle.png'),
@@ -51,13 +134,52 @@ export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
   parallelogram: require('../assets/shapes/shape_parallelogram.png'),
 };
 
-// Local narrow types for sn-plugin-lib responses. The SDK declares these
+// Fixed panel width so layout is deterministic (Nomad is 1404 px wide —
+// a 336 px panel leaves ample room for the main page view on the right).
+// Panel was shrunk to ~60% of the earlier 560-px layout per user
+// directive 2026-04-18 ("reduce the Popup so that the popup is about 60%
+// of what it is right now"). All internal geometry (padding, gaps, cell
+// size, preview frame, etc.) was scaled by the same factor; font sizes
+// were floored at 9-10 px so the popup stays readable on e-ink.
+const PANEL_WIDTH = 336;
+const PANEL_PADDING = 8;
+// Gap between shapes column and preview column in Row 1 only.
+const ROW1_GAP = 8;
+// Fixed right-column width in Row 1. 108 px fits the 38-px preview icon
+// plus the width-sample bar plus padding.
+const PREVIEW_COLUMN_WIDTH = 108;
+const SHAPES_COLUMN_WIDTH =
+  PANEL_WIDTH - PANEL_PADDING * 2 - ROW1_GAP - PREVIEW_COLUMN_WIDTH;
+
+const GRID_COLS = 4;
+const GRID_GAP = 4;
+
+// Cell sizing: thumbnail + fixed padding on each side. We render the
+// thumbnail at 30 px (below the PNG authoring resolution of 48 px — RN
+// downscales cleanly without the aliasing we'd see if we went *above*
+// native) and give 8 px padding per side.
+//
+// Padding was reduced 14 → 8 px as part of the 2026-04-18 overall ~60%
+// popup shrink; the prior 14 px came from an earlier pass that tightened
+// from an original ~18 px.
+const CELL_PADDING_PX = 8;
+const THUMBNAIL_SIZE = 30;
+const CELL_SIZE = THUMBNAIL_SIZE + CELL_PADDING_PX * 2; // 46
+// Sanity: if anyone bumps GRID_COLS the fixed CELL_SIZE still has to
+// fit inside SHAPES_COLUMN_WIDTH. At GRID_COLS=4 we need
+// 4*46 + 3*4 = 196 ≤ SHAPES_COLUMN_WIDTH (204) — fits comfortably, with
+// ~8 px of breathing room absorbed by the column's native centering.
+
+// Local narrow type for sn-plugin-lib responses. The SDK declares its
 // methods as returning the generic `Object` type, so TS doesn't know
 // about the `{success, result}` envelope the firmware actually returns.
-// Keep these types in sync with sn-plugin-lib if the envelope changes.
 type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | null | undefined;
 
-async function resolvePageSize(): Promise<{ width: number; height: number }> {
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function resolvePageSize(): Promise<{width: number; height: number}> {
   try {
     const pathRes = (await PluginCommAPI.getCurrentFilePath()) as ApiRes<string>;
     const pageRes = (await PluginCommAPI.getCurrentPageNum()) as ApiRes<number>;
@@ -76,29 +198,29 @@ async function resolvePageSize(): Promise<{ width: number; height: number }> {
       }
     }
   } catch {
-    // Fall through to defaults
+    // Fall through to defaults.
   }
-  return { width: DEFAULT_PAGE_WIDTH, height: DEFAULT_PAGE_HEIGHT };
+  return {width: DEFAULT_PAGE_WIDTH, height: DEFAULT_PAGE_HEIGHT};
 }
 
-async function insertShape(shape: Shape, pageWidth: number, pageHeight: number): Promise<void> {
-  const center = { x: pageWidth / 2, y: pageHeight / 2 };
-
+/**
+ * Insert a shape at the page center with the user's chosen style baked
+ * in. Single insertGeometry call (auto-lassos the new shape on the host).
+ * Throws on any API failure; caller is responsible for showing an error.
+ */
+async function insertShape(
+  shape: Shape,
+  style: PenStyle,
+  pageWidth: number,
+  pageHeight: number,
+): Promise<void> {
+  const center = {x: pageWidth / 2, y: pageHeight / 2};
   const params = Object.fromEntries(
-    shape.parameters.map(p => [p.id, p.defaultValue])
+    shape.parameters.map(p => [p.id, p.defaultValue]),
   );
-
-  const geometry = shape.build(center, params, PEN_DEFAULTS);
-  // Ask sn-plugin-lib / host firmware to auto-activate the lasso on the
-  // inserted shape so the user can immediately move, resize, or style it
-  // without re-entering lasso mode. Verified end-to-end on Chauvet 3.27.41
-  // (logcat 2026-04-16T18:29:29 showed `setLassoDate: jniLassoInfo ...
-  // geometrycircle=1` and `AreaSelectionView: getVisibility: 0 isClose
-  // false` firing automatically after insertGeometry). See GeometryFlags
-  // in ./shapes.
+  const geometry = shape.build(center, params, style);
   geometry.showLassoAfterInsert = true;
-
-  const res = await PluginCommAPI.insertGeometry(geometry);
+  const res = (await PluginCommAPI.insertGeometry(geometry)) as ApiRes<unknown>;
   if (!res?.success) {
     console.error('insertGeometry failed:', JSON.stringify(res));
     throw new Error(res?.error?.message ?? 'insertGeometry failed');
@@ -107,23 +229,41 @@ async function insertShape(shape: Shape, pageWidth: number, pageHeight: number):
 
 const ERROR_DISPLAY_MS = 2000;
 
-const SidebarNode = () => (
-  <View style={styles.nodeContainer}>
-  <View style={styles.nodeDot} />
-  <View style={styles.nodeLine} />
-  </View>
-);
+/**
+ * Pick a representative geometry type for the StrokePreview fallback.
+ * Builds the shape with default params + the current style at the page
+ * origin, just to read its `type` field (GEO_polygon / GEO_circle /
+ * GEO_ellipse / straightLine). Pure — no side effects. Only consulted
+ * when the preview can't render from the PNG icon for some reason.
+ */
+function previewShapeType(shape: Shape, style: PenStyle): string | undefined {
+  const CENTER = {x: 0, y: 0};
+  const params = Object.fromEntries(
+    shape.parameters.map(p => [p.id, p.defaultValue]),
+  );
+  return shape.build(CENTER, params, style).type;
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function ShapePalette() {
   const insertingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [showTooltip, setShowTooltip] = useState(false);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [pageWidth, setPageWidth] = useState(DEFAULT_PAGE_WIDTH);
   const [pageHeight, setPageHeight] = useState(DEFAULT_PAGE_HEIGHT);
 
+  // Selection state. Default to rectangle — matches the native popup's
+  // typical landing state and gives the preview something to show before
+  // the user makes any selection.
+  const [selectedId, setSelectedId] = useState<ShapeId>('rectangle');
+  const [style, setStyle] = useState<PenStyle>(PEN_DEFAULTS);
+
   useEffect(() => {
-    resolvePageSize().then(({ width, height }) => {
+    resolvePageSize().then(({width, height}) => {
       setPageWidth(width);
       setPageHeight(height);
     });
@@ -132,9 +272,51 @@ export default function ShapePalette() {
     };
   }, []);
 
-const layout = computeLayout(pageWidth);
+  const selectedShape = useMemo(
+    () => SHAPES.find(s => s.id === selectedId) ?? SHAPES[0],
+    [selectedId],
+  );
 
-  const handleShapeTap = useCallback(async (shape: Shape) => {
+  const previewType = useMemo(
+    () => previewShapeType(selectedShape, style),
+    [selectedShape, style],
+  );
+
+  const previewIcon = SHAPE_ICONS[selectedShape.id];
+
+  const showError = useCallback((msg: string) => {
+    setError(msg);
+    if (errorTimerRef.current) {clearTimeout(errorTimerRef.current);}
+    errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
+  }, []);
+
+  const handleShapeTap = useCallback((shape: Shape) => {
+    if (insertingRef.current) {return;}
+    setSelectedId(shape.id);
+  }, []);
+
+  const handleWidthPress = useCallback((value: number) => {
+    if (insertingRef.current) {return;}
+    if (!isAcceptablePenWidth(value)) {return;}
+    setStyle(prev => ({...prev, penWidth: value}));
+  }, []);
+
+  const handleColorPress = useCallback((value: number) => {
+    if (insertingRef.current) {return;}
+    setStyle(prev => ({...prev, penColor: value}));
+  }, []);
+
+  /**
+   * Tapping OUTSIDE the panel = "commit and close". Replaces the old
+   * explicit Insert button (2026-04-18). If the insert fails we keep the
+   * popup open and flash an error banner so the user can retry without
+   * losing their selection.
+   *
+   * The ✕ button in the header remains a distinct, explicit "cancel"
+   * affordance — it calls PluginManager.closePluginView directly without
+   * going through insertShape.
+   */
+  const handleOverlayPress = useCallback(async () => {
     if (insertingRef.current) {return;}
     insertingRef.current = true;
     setError(null);
@@ -143,91 +325,184 @@ const layout = computeLayout(pageWidth);
       errorTimerRef.current = null;
     }
     try {
-      await insertShape(shape, pageWidth, pageHeight);
+      await insertShape(selectedShape, style, pageWidth, pageHeight);
       PluginManager.closePluginView();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Insert failed';
-      setError(message);
-      errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
+      showError(message);
     } finally {
       insertingRef.current = false;
     }
-  }, [pageWidth, pageHeight]);
-
-  const handleOverlayPress = useCallback(() => {
-    if (!insertingRef.current) {
-      PluginManager.closePluginView();
-    }
-  }, []);
-
-  const rows: Shape[][] = [];
-  for (let i = 0; i < SHAPES.length; i += COLS) {
-    rows.push(SHAPES.slice(i, i + COLS));
-  }
+  }, [selectedShape, style, pageWidth, pageHeight, showError]);
 
   return (
-    <Pressable testID={TEST_IDS.overlay} style={styles.container} onPress={handleOverlayPress}>
-      <Pressable style={[styles.panel, { width: layout.panelWidth }]} onPress={e => e.stopPropagation()}>
-        <SidebarNode />
-        <View style={styles.panelHeaderRow}>
-          <Text style={styles.panelTitle}>Shapes</Text>
+    <Pressable
+      testID={TEST_IDS.overlay}
+      style={styles.container}
+      onPress={handleOverlayPress}>
+      <Pressable
+        style={[styles.panel, {width: PANEL_WIDTH}]}
+        onPress={e => e.stopPropagation()}>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>Shapes</Text>
           <Pressable
-            onPress={() => setShowTooltip(v => !v)}
-            style={({ pressed }) => [styles.headerIconBtn, pressed && styles.headerIconBtnPressed]}>
-            <Text style={styles.headerIconText}>{'?'}</Text>
+            testID={TEST_IDS.closeButton}
+            onPress={() => PluginManager.closePluginView()}
+            style={({pressed}) => [styles.closeBtn, pressed && styles.closeBtnPressed]}>
+            <Text style={styles.closeText}>✕</Text>
           </Pressable>
         </View>
         <View style={styles.divider} />
+
         {error && (
           <View testID={TEST_IDS.error} style={styles.errorBanner}>
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
-        <View style={styles.gridWrapper}>
-          <View style={[styles.gridContainer, { padding: layout.padding }]}>
-            {rows.map((row, rowIdx) => (
-              <View key={rowIdx}>
-                {rowIdx > 0 && <View style={styles.rowDivider} />}
-                <View style={[styles.row, { gap: layout.gap }]}>
-                  {row.map(shape => (
-                    <Pressable
-                      testID={TEST_IDS.cell(shape.id)}
-                      key={shape.id}
-                      style={[styles.cell, { width: layout.cell, height: layout.cell }]}
-                      onPress={() => handleShapeTap(shape)}>
-                      <Image
-                        source={SHAPE_ICONS[shape.id]}
-                        style={[styles.thumbnail, { width: layout.thumbnail, height: layout.thumbnail }]}
-                      />
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-            ))}
-          </View>
-          {showTooltip && (
-            <View style={styles.tooltipWrapper}>
-              {/* The black outline for the triangle */}
-              <View style={styles.tooltipCaretBorder} />
-              {/* The white inside of the triangle */}
-              <View style={styles.tooltipCaretFill} />
 
-              <View style={styles.tooltipBubble}>
-                <Text style={styles.tooltipText}>
-                  Single tap to draw instantly.{'\n'}
-                  Made with ❤️ for those who write.
-                </Text>
-                <Pressable onPress={() => setShowTooltip(false)} hitSlop={10} style={styles.tooltipClose}>
-                  <Text style={styles.tooltipCloseText}>✕</Text>
-                </Pressable>
-              </View>
+        {/* Hybrid grid body: Row 1 two-col (shapes + preview), then full-width picker rows. */}
+        <View style={styles.body}>
+          {/* Row 1 — shapes grid + preview side by side. */}
+          <View style={styles.firstRow}>
+            <View testID={TEST_IDS.shapesColumn} style={styles.shapesColumn}>
+              <ScrollView style={styles.gridScroll} contentContainerStyle={styles.gridContainer}>
+                <ShapeGrid
+                  shapes={SHAPES}
+                  selectedId={selectedId}
+                  onSelect={handleShapeTap}
+                />
+              </ScrollView>
             </View>
-          )}
+
+            <View testID={TEST_IDS.previewColumn} style={styles.previewColumn}>
+              <StrokePreview
+                shapeType={previewType}
+                penWidth={style.penWidth}
+                penColor={style.penColor}
+                penType={style.penType}
+                iconSource={previewIcon}
+              />
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          {/* Row 2 — Stroke Width (full-width). */}
+          <View testID={TEST_IDS.widthRow} style={styles.section}>
+            <Text style={styles.sectionLabel}>Stroke Width</Text>
+            <View style={styles.widthRow}>
+              {WIDTH_PRESETS.map(p => {
+                const selected = style.penWidth === p.value;
+                return (
+                  <Pressable
+                    key={p.value}
+                    testID={TEST_IDS.widthButton(p.value)}
+                    onPress={() => handleWidthPress(p.value)}
+                    style={({pressed}) => [
+                      styles.widthBtn,
+                      selected && styles.widthBtnSelected,
+                      pressed && styles.widthBtnPressed,
+                    ]}>
+                    <View
+                      style={[
+                        styles.widthPreview,
+                        {height: Math.max(2, Math.round(p.value / 100))},
+                      ]}
+                    />
+                    <Text style={styles.widthLabel}>{p.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          {/* Row 3 — Stroke Color (full-width). */}
+          <View testID={TEST_IDS.colorRow} style={styles.section}>
+            <Text style={styles.sectionLabel}>Stroke Color</Text>
+            <View style={styles.pickerRow}>
+              {COLOR_PRESETS.map(c => {
+                const selected = style.penColor === c.value;
+                return (
+                  <Pressable
+                    key={c.value}
+                    testID={TEST_IDS.colorButton(c.value)}
+                    onPress={() => handleColorPress(c.value)}
+                    style={({pressed}) => [
+                      styles.colorBtn,
+                      selected && styles.colorBtnSelected,
+                      pressed && styles.colorBtnPressed,
+                    ]}>
+                    <View style={[styles.colorSwatch, {backgroundColor: c.swatch}]} />
+                    <Text style={styles.colorLabel}>{c.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
         </View>
       </Pressable>
     </Pressable>
   );
 }
+
+// ---------------------------------------------------------------------------
+// ShapeGrid sub-component
+// ---------------------------------------------------------------------------
+
+type ShapeGridProps = {
+  shapes: readonly Shape[];
+  selectedId: ShapeId;
+  onSelect: (shape: Shape) => void;
+};
+
+function ShapeGrid({shapes, selectedId, onSelect}: ShapeGridProps) {
+  // Slice into fixed-width rows so the grid renders deterministically even
+  // if ScrollView chokes on flex-wrap on older RN versions.
+  const rows: Shape[][] = [];
+  for (let i = 0; i < shapes.length; i += GRID_COLS) {
+    rows.push(shapes.slice(i, i + GRID_COLS));
+  }
+  return (
+    <View>
+      {rows.map((row, idx) => (
+        <View key={idx} style={styles.gridRow}>
+          {row.map(shape => {
+            const isSelected = selectedId === shape.id;
+            return (
+              <Pressable
+                key={shape.id}
+                testID={TEST_IDS.cell(shape.id)}
+                style={({pressed}) => [
+                  styles.cell,
+                  isSelected && styles.cellSelected,
+                  pressed && styles.cellPressed,
+                ]}
+                onPress={() => onSelect(shape)}>
+                <Image
+                  source={SHAPE_ICONS[shape.id]}
+                  style={styles.thumbnail}
+                  resizeMode="contain"
+                />
+              </Pressable>
+            );
+          })}
+          {/* Fill empty cells in the last row so sibling widths match. */}
+          {row.length < GRID_COLS &&
+            Array.from({length: GRID_COLS - row.length}).map((_, i) => (
+              <View key={`filler-${i}`} style={styles.cellFiller} />
+            ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   container: {
@@ -238,165 +513,198 @@ const styles = StyleSheet.create({
   },
   panel: {
     marginLeft: 90,
-    top: '50%',
-    transform: [{ translateY: -59 }],
+    top: '2%',
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#000000',
     overflow: 'visible',
+    paddingBottom: PANEL_PADDING,
   },
-  panelHeaderRow: {
+  headerRow: {
     paddingHorizontal: PANEL_PADDING,
-    paddingVertical: 18,
+    paddingVertical: 8,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
   },
-  panelTitle: {
-    fontSize: 22,
+  title: {
+    fontSize: 14,
     fontWeight: 'bold',
     color: '#000000',
   },
-  headerIconBtn: {
+  closeBtn: {
     position: 'absolute',
     right: PANEL_PADDING,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    borderWidth: 2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
     borderColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerIconBtnPressed: {
+  closeBtnPressed: {
     backgroundColor: '#F0F0F0',
   },
-  headerIconText: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#000000',
-  },
-  tooltipWrapper: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    width: 250,
-    zIndex: 999,
-  },
-  tooltipBubble: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#000000',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-  },
-  tooltipText: {
-    flex: 1,
-    fontSize: 18,
+  closeText: {
+    fontSize: 10,
     fontWeight: 'bold',
     color: '#000000',
-    lineHeight: 18,
-    marginRight: 8,
-  },
-  tooltipClose: {
-    padding: 2,
-  },
-  tooltipCloseText: {
-    fontSize: 14,
-    color: '#000000',
-    fontWeight: 'bold',
-  },
-  tooltipCaretBorder: {
-    position: 'absolute',
-    top: -10, // Pulls the triangle up outside the bubble
-    right: 10,
-    width: 0,
-    height: 0,
-    borderStyle: 'solid',
-    borderLeftWidth: 9,
-    borderRightWidth: 9,
-    borderBottomWidth: 10,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-    borderBottomColor: '#000000', // Draws the black outline
-  },
-  tooltipCaretFill: {
-    position: 'absolute',
-    top: -8,
-    right: 11, // Shifted by 1px to center perfectly inside the border caret
-    width: 0,
-    height: 0,
-    borderStyle: 'solid',
-    borderLeftWidth: 8,
-    borderRightWidth: 8,
-    borderBottomWidth: 9,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-    borderBottomColor: '#FFFFFF', // Draws the white interior
-    zIndex: 1, // Guarantees this sits on top of the black caret
   },
   divider: {
     height: 1,
     backgroundColor: '#CCCCCC',
   },
-  rowDivider: {
-    borderTopWidth: 1,
-    borderTopColor: '#CCCCCC',
-    borderStyle: 'dashed',
-    backgroundColor: 'transparent',
-    height: 0,
-    marginVertical: CELL_GAP,
-  },
   errorBanner: {
     marginHorizontal: PANEL_PADDING,
-    marginTop: 8,
+    marginTop: 5,
     backgroundColor: '#1A1A1A',
-    borderRadius: 4,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
+    borderRadius: 3,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
   },
   errorText: {
     color: '#FFFFFF',
-    fontSize: 13,
+    fontSize: 10,
     textAlign: 'center',
   },
-  gridWrapper: {
-    position: 'relative',
+  body: {
+    paddingHorizontal: PANEL_PADDING,
+    paddingTop: 5,
   },
-  gridContainer: {},
-  row: {
+  firstRow: {
     flexDirection: 'row',
+    gap: ROW1_GAP,
+    marginBottom: 5,
+  },
+  shapesColumn: {
+    width: SHAPES_COLUMN_WIDTH,
+  },
+  previewColumn: {
+    width: PREVIEW_COLUMN_WIDTH,
+    // Subtle divider-like border on the leading edge helps separate the
+    // two columns without needing a full-height <View style={divider}/>.
+    borderLeftWidth: 1,
+    borderLeftColor: '#CCCCCC',
+    paddingLeft: ROW1_GAP,
+  },
+  // Cap the grid height so the 12 shapes (3 rows × 4 cols) stay within
+  // a predictable band — still scrollable if a future revision adds more.
+  // 3 rows × (CELL_SIZE 46 + GRID_GAP 4) = 150, +6 breathing room.
+  gridScroll: {
+    maxHeight: 156,
+  },
+  gridContainer: {
+    paddingVertical: 2,
+  },
+  gridRow: {
+    flexDirection: 'row',
+    gap: GRID_GAP,
+    marginBottom: GRID_GAP,
   },
   cell: {
+    width: CELL_SIZE,
+    height: CELL_SIZE,
+    borderWidth: 1,
+    borderColor: '#CCCCCC',
+    borderRadius: 5,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  cellSelected: {
+    borderColor: '#000000',
+    borderWidth: 2,
+    backgroundColor: '#F0F0F0',
+  },
+  cellPressed: {
+    backgroundColor: '#E8E8E8',
+  },
+  cellFiller: {
+    width: CELL_SIZE,
+    height: CELL_SIZE,
   },
   thumbnail: {
-    resizeMode: 'contain',
+    width: THUMBNAIL_SIZE,
+    height: THUMBNAIL_SIZE,
   },
-  nodeContainer: {
-    position: 'absolute',
-    left: -22, // Sits in the gap between toolbar and panel
-    top: 24,   // Centers vertically with the "Shapes" title
+  section: {
+    paddingTop: 6,
+    paddingBottom: 2,
+  },
+  sectionLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  pickerRow: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 4,
+  },
+  widthRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 2,
+  },
+  widthBtn: {
+    flex: 1,
+    paddingVertical: 4,
+    paddingHorizontal: 1,
     alignItems: 'center',
-    zIndex: 10,
+    justifyContent: 'center',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#CCCCCC',
+    gap: 2,
   },
-  nodeDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#000000', // Pure black for e-ink
+  widthBtnSelected: {
+    borderColor: '#000000',
+    borderWidth: 2,
   },
-  nodeLine: {
-    width: 12, // Short bridge from dot to panel border
-    height: 1.5,
+  widthBtnPressed: {
+    backgroundColor: '#F0F0F0',
+  },
+  widthPreview: {
+    width: 12,
     backgroundColor: '#000000',
+    borderRadius: 1,
+  },
+  widthLabel: {
+    fontSize: 9,
+    color: '#000000',
+    fontWeight: '600',
+  },
+  colorBtn: {
+    flex: 1,
+    paddingVertical: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#CCCCCC',
+    gap: 3,
+  },
+  colorBtnSelected: {
+    borderColor: '#000000',
+    borderWidth: 2,
+  },
+  colorBtnPressed: {
+    backgroundColor: '#F0F0F0',
+  },
+  colorSwatch: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#000000',
+  },
+  colorLabel: {
+    fontSize: 9,
+    color: '#000000',
+    fontWeight: '600',
   },
 });

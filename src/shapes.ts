@@ -82,7 +82,11 @@ export type Shape = {
 export const PEN_DEFAULTS: PenStyle = {
   penColor: 0x00,
   penType: 10,
-  penWidth: 400,
+  // Match the new M preset so the default width is highlighted in the
+  // Shapes popup (WIDTH_PRESETS collapsed 9→5 on 2026-04-18; the old
+  // 400 µm default no longer corresponds to any preset). Firmware
+  // accepts any value ≥ MIN_PEN_WIDTH, so this is purely a UI default.
+  penWidth: 500,
 };
 
 export function regularPolygon(

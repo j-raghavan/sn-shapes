@@ -6,61 +6,159 @@
  *   1. Opens when the user lassos a shape and taps Shape Options in the
  *      firmware's overflow menu. The plugin UI starts, App.tsx routes to
  *      this component (see pluginRouter).
- *   2. On mount, calls PluginCommAPI.getLassoGeometries() to read the
- *      current geometry (firmware keeps the lasso selection active while
- *      the plugin runs, confirmed via logcat line 28760 sendMenuItemEvent).
- *   3. Renders three action groups — Stroke Width, Stroke Color, Delete.
- *      Width/color taps update a local "pending patch" instead of firing
- *      modifyLassoGeometry immediately — that way the user can adjust both
- *      properties in one session (matching the BOOX e-ink shape panel UX).
- *      Tapping the overlay (outside the popup) or the ✕ close button
- *      commits the pending patch via modifyLassoGeometry and closes.
- *      Tapping Delete calls deleteLassoElements() immediately (destructive
- *      actions bypass deferred-apply).
+ *   2. On mount, calls PluginCommAPI.getLassoGeometries() + getLassoRect()
+ *      to read the current geometry and its lasso bounds (firmware keeps
+ *      the lasso selection active while the plugin runs, confirmed via
+ *      logcat line 28760 sendMenuItemEvent).
+ *   3. Renders a StrokePreview at the top (shape name + sample stroke that
+ *      reflects the currently-effective width/color/type), then three
+ *      picker sections — Stroke Width, Stroke Color, Pen Type — and a
+ *      destructive Delete button. Picker taps update a local "pending
+ *      patch" instead of firing modifyLassoGeometry immediately — that way
+ *      the user can adjust multiple properties in one session and commit
+ *      them atomically. Tapping the overlay (outside the popup) or the ✕
+ *      close button commits the pending patch via modifyLassoGeometry and
+ *      closes. Tapping Delete calls deleteLassoElements() immediately
+ *      (destructive actions bypass deferred-apply).
  *   4. On modify/delete success the plugin view is closed via
  *      PluginManager.closePluginView(). On error the banner shows and the
  *      panel stays open so the user can retry or change selection.
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import {View, Text, Pressable, StyleSheet} from 'react-native';
+import {View, Text, Pressable, StyleSheet, ViewStyle} from 'react-native';
 import {PluginCommAPI, PluginManager} from 'sn-plugin-lib';
 import {bakeLassoResize, Rect} from './lassoTransform';
+import StrokePreview from './StrokePreview';
 
 export const TEST_IDS = {
   overlay: 'shape-options-overlay',
   widthButton: (w: number) => `shape-options-width-${w}`,
   colorButton: (c: number) => `shape-options-color-${c}`,
+  penTypeButton: (t: number) => `shape-options-pentype-${t}`,
   delete: 'shape-options-delete',
   error: 'shape-options-error',
   loading: 'shape-options-loading',
   empty: 'shape-options-empty',
 } as const;
 
-// Pen-width presets. GeometrySchema.penWidth requires min: 100. These five
-// values mirror the sidebar pen ticks and keep the default (400) in the
-// middle so the most common selection needs the smallest thumb travel.
-export const WIDTH_PRESETS: ReadonlyArray<{value: number; label: string}> = [
-  {value: 200, label: 'XS'},
-  {value: 300, label: 'S'},
-  {value: 400, label: 'M'},
-  {value: 600, label: 'L'},
-  {value: 900, label: 'XL'},
+// Firmware floor for penWidth. GeometrySchema in
+// node_modules/sn-plugin-lib/src/sdk/utils/VerifyUtils.ts line 523 enforces
+// `penWidth: { type: 'number', min: 100, required: true }`. Any value below
+// this gets rejected by the native bridge with a verify error. We expose
+// this as a named constant (and enforce it in `handleWidthPress` via
+// `isAcceptablePenWidth`) so no code path inside this panel can ever push
+// a sub-100 value into the pending patch — belt-and-suspenders on top of
+// the preset list.
+export const MIN_PEN_WIDTH = 100;
+
+/**
+ * True iff `value` is a finite number at or above the firmware's penWidth
+ * floor. Pure so that the guard can be unit-tested directly without
+ * rendering the component.
+ */
+export function isAcceptablePenWidth(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= MIN_PEN_WIDTH
+  );
+}
+
+// Pen-width presets. GeometrySchema.penWidth requires min: MIN_PEN_WIDTH;
+// units are micrometres so `penWidth / 1000 = mm`. We expose 5 ticks
+// labelled XS/S/M/L/XL — even spacing across the firmware-supported
+// range (0.10, 0.30, 0.50, 0.70, 0.90 mm).
+//
+// 2026-04-18 history note: this was a 9-tick list (every 0.10 mm), but
+// per user direction we collapsed to 5 sizes to match the 5-color row's
+// layout pattern and reduce decision overhead. T-shirt sizes read more
+// naturally than raw mm at-a-glance for a quick "make this thicker"
+// choice — exact mm is still surfaced via formatPenWidthMm in the
+// preview meta row so power users can confirm the absolute value.
+export const WIDTH_PRESETS: ReadonlyArray<{value: number; mm: number; label: string}> = [
+  {value: 100, mm: 0.10, label: 'XS'},
+  {value: 300, mm: 0.30, label: 'S'},
+  {value: 500, mm: 0.50, label: 'M'},
+  {value: 700, mm: 0.70, label: 'L'},
+  {value: 900, mm: 0.90, label: 'XL'},
 ];
+
+export function formatPenWidthMm(penWidth: number | undefined): string {
+  if (typeof penWidth !== 'number' || !Number.isFinite(penWidth)) {return '—';}
+  return `${(penWidth / 1000).toFixed(2)} mm`;
+}
 
 // Pen-color presets. The Supernote firmware enforces an allow-list of
 // penColor values on the native side (see
-// node_modules/sn-plugin-lib/android/.../constant/Constant.java → PEN_COLORS
-// and the docstring on Element.ts line 734:
-//   `0x00=black, 0x9D=dark gray, 0xC9=light gray, 0xFE=white`).
-// Arbitrary ints (e.g. 0x80, 0xC8) are rejected by the native bridge with
-// a "Invalid color value. Cannot call the API" toast — so we stick to the
-// documented palette. White is intentionally omitted since a white stroke
-// on white paper is invisible and would confuse users.
+// node_modules/sn-plugin-lib/android/.../constant/Constant.java → PEN_COLORS):
+//   [0xFE, 0x9D, 0x9E, 0xC9, 202 (0xCA), 0, 255, -101, -102, 1]
+// Anything not in that list (e.g. 0x80, 0x9A, 0xC8) is rejected by the
+// native bridge with an "Invalid color value. Cannot call the API" toast.
+// The non-gray values in the allow-list (`1` is a marker-type sentinel per
+// the Chinese comment in Constant.java line 55; signed bytes -101/-102 are
+// platform artefacts) aren't meaningful as user-facing colors on the Nomad's
+// greyscale e-ink. We surface 5 ALLOW-LISTED gray levels here. Note that
+// 0x9D ↔ 0x9E and 0xC9 ↔ 0xCA differ by only one density unit each, so the
+// "Dark"/"Dark+" and "Light"/"Light+" pairs render very similarly on-device
+// — we expose both because they're the only valid mid-gray slots the
+// firmware accepts. We omit true white (0xFE / 0xFF / 255) since a white
+// stroke on white paper would be invisible and would only confuse users.
+//
+// Historical note: an earlier version had 0x9A in the "Dark+" slot; it
+// looked correct on the simulator but the on-device firmware rejected it
+// with the "Invalid color" toast. Replaced with 0x9E (the closest valid
+// mid-gray) on 2026-04-18 — see user report on v1.0.2 alpha 4.
 export const COLOR_PRESETS: ReadonlyArray<{value: number; label: string; swatch: string}> = [
   {value: 0x00, label: 'Black', swatch: '#000000'},
-  {value: 0x9D, label: 'Dark', swatch: '#9D9D9D'},
-  {value: 0xC9, label: 'Light', swatch: '#C9C9C9'},
+  {value: 0x9D, label: 'Dark+', swatch: '#5A5A5A'},
+  {value: 0x9E, label: 'Dark', swatch: '#7A7A7A'},
+  {value: 0xC9, label: 'Light', swatch: '#B0B0B0'},
+  {value: 0xCA, label: 'Light+', swatch: '#CCCCCC'},
 ];
+
+// Convert a firmware penColor byte into a CSS-ish #RRGGBB for on-screen
+// preview rendering. The Nomad renders these as grayscale, but the raw byte
+// is the ink DENSITY (0 = solid black, 0xFE/0xFF = white). Our swatch hex
+// above is tuned to approximate how the density renders in practice, not the
+// raw byte value (e.g. 0x9D stores as density 157 but visually reads darker
+// than #9D9D9D on e-ink, so our swatch is #7A7A7A). For arbitrary inputs not
+// in the presets we fall back to the raw grayscale.
+export function penColorToSwatch(penColor: number | undefined): string {
+  if (typeof penColor !== 'number' || !Number.isFinite(penColor)) {return '#000000';}
+  const preset = COLOR_PRESETS.find(c => c.value === penColor);
+  if (preset) {return preset.swatch;}
+  // Fallback: map the byte to an on-screen grayscale.
+  const clamped = Math.max(0, Math.min(255, Math.round(penColor)));
+  const hex = clamped.toString(16).padStart(2, '0').toUpperCase();
+  return `#${hex}${hex}${hex}`;
+}
+
+// Pen-type presets. Values come from the firmware allow-list in
+// Constant.java → PEN_TYPES, documented on Element.ts line 735:
+//   `10=fineliner, 1=pressure pen, 11=marker, 14=Calligraphy`
+// Order here matches the sidebar pen order on Nomad so the mental model
+// transfers 1:1 from the main drawing surface.
+export const PEN_TYPE_PRESETS: ReadonlyArray<{value: number; label: string}> = [
+  {value: 10, label: 'Fineliner'},
+  {value: 1, label: 'Pressure'},
+  {value: 11, label: 'Marker'},
+  {value: 14, label: 'Calligraphy'},
+];
+
+// Human-friendly name for a Geometry.type, used as the preview header. The
+// four types come from Geometry.TYPE_* in Element.ts line 836–839 and the
+// Constant.java GEO_TYPES allow-list.
+export const SHAPE_DISPLAY_NAMES: Record<string, string> = {
+  straightLine: 'Line',
+  GEO_circle: 'Circle',
+  GEO_ellipse: 'Ellipse',
+  GEO_polygon: 'Polygon',
+};
+
+export function shapeDisplayName(type: string | undefined): string {
+  if (!type) {return 'Shape';}
+  return SHAPE_DISPLAY_NAMES[type] ?? 'Shape';
+}
 
 const ERROR_DISPLAY_MS = 2000;
 
@@ -130,7 +228,29 @@ async function readLassoRect(): Promise<Rect | null> {
   }
 }
 
-type PendingPatch = Partial<Pick<Geometry, 'penWidth' | 'penColor'>>;
+type PendingPatch = Partial<Pick<Geometry, 'penWidth' | 'penColor' | 'penType'>>;
+
+/**
+ * Visual approximation of each pen type for the picker buttons. The true
+ * rendering happens in firmware so we can only hint at the difference: a
+ * fineliner is thin & uniform; a pressure pen is slightly thicker with
+ * rounded ends; a marker is fat and translucent; calligraphy gets a slight
+ * skew. Always renders in solid black so the picker shows TYPE differences
+ * — colour is communicated separately by the StrokePreview at the top.
+ */
+export function penTypeStrokeStyle(penType: number): ViewStyle {
+  switch (penType) {
+    case 1: // Pressure pen — slightly tapered feel via rounded ends
+      return {height: 3, opacity: 1, borderRadius: 1.5};
+    case 11: // Marker — thick + translucent
+      return {height: 7, opacity: 0.55};
+    case 14: // Calligraphy — angled
+      return {height: 4, opacity: 1, transform: [{skewX: '-15deg'}]};
+    case 10: // Fineliner — thin uniform (also the default fallback)
+    default:
+      return {height: 2, opacity: 1};
+  }
+}
 
 export default function ShapeOptionsPanel() {
   const [geometry, setGeometry] = useState<Geometry | null>(null);
@@ -160,11 +280,12 @@ export default function ShapeOptionsPanel() {
     errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
   }, []);
 
-  // Effective values shown as "selected" in the UI. Unset fields fall back
-  // to the geometry's current value so the initial render mirrors the
-  // shape's actual state.
+  // Effective values shown as "selected" in the UI and fed to StrokePreview.
+  // Unset fields fall back to the geometry's current value so the initial
+  // render mirrors the shape's actual state before the user picks anything.
   const effectiveWidth = pendingPatch.penWidth ?? geometry?.penWidth;
   const effectiveColor = pendingPatch.penColor ?? geometry?.penColor;
+  const effectivePenType = pendingPatch.penType ?? geometry?.penType;
 
   /**
    * Filter the pending patch to only fields that actually differ from the
@@ -179,6 +300,9 @@ export default function ShapeOptionsPanel() {
       }
       if (patch.penColor != null && patch.penColor !== g.penColor) {
         out.penColor = patch.penColor;
+      }
+      if (patch.penType != null && patch.penType !== g.penType) {
+        out.penType = patch.penType;
       }
       return out;
     },
@@ -229,12 +353,23 @@ export default function ShapeOptionsPanel() {
 
   const handleWidthPress = useCallback((value: number) => {
     if (busyRef.current) {return;}
+    // Defense-in-depth: GeometrySchema.penWidth has min=MIN_PEN_WIDTH on
+    // the native bridge. Reject anything below that here so a stray
+    // caller (or a future edit to WIDTH_PRESETS) can never produce a
+    // verify error from modifyLassoGeometry. Non-finite values are also
+    // dropped — the presets are integers, so anything else is a bug.
+    if (!isAcceptablePenWidth(value)) {return;}
     setPendingPatch(prev => ({...prev, penWidth: value}));
   }, []);
 
   const handleColorPress = useCallback((value: number) => {
     if (busyRef.current) {return;}
     setPendingPatch(prev => ({...prev, penColor: value}));
+  }, []);
+
+  const handlePenTypePress = useCallback((value: number) => {
+    if (busyRef.current) {return;}
+    setPendingPatch(prev => ({...prev, penType: value}));
   }, []);
 
   const handleDelete = useCallback(async () => {
@@ -294,8 +429,17 @@ export default function ShapeOptionsPanel() {
 
         {!loading && geometry && (
           <View style={styles.body}>
+            <StrokePreview
+              shapeType={geometry.type}
+              penWidth={effectiveWidth}
+              penColor={effectiveColor}
+              penType={effectivePenType}
+            />
+
+            <View style={styles.rowDivider} />
+
             <Text style={styles.sectionLabel}>Stroke Width</Text>
-            <View style={styles.row}>
+            <View style={styles.widthRow}>
               {WIDTH_PRESETS.map(p => {
                 const selected = effectiveWidth === p.value;
                 return (
@@ -314,7 +458,7 @@ export default function ShapeOptionsPanel() {
                         {height: Math.max(2, Math.round(p.value / 100))},
                       ]}
                     />
-                    <Text style={styles.widthLabel}>{p.label}</Text>
+                    <Text style={styles.widthLabel}>{p.mm.toFixed(2)}</Text>
                   </Pressable>
                 );
               })}
@@ -345,6 +489,33 @@ export default function ShapeOptionsPanel() {
 
             <View style={styles.rowDivider} />
 
+            <Text style={styles.sectionLabel}>Pen Type</Text>
+            <View style={styles.row}>
+              {PEN_TYPE_PRESETS.map(t => {
+                const selected = effectivePenType === t.value;
+                return (
+                  <Pressable
+                    key={t.value}
+                    testID={TEST_IDS.penTypeButton(t.value)}
+                    onPress={() => handlePenTypePress(t.value)}
+                    style={({pressed}) => [
+                      styles.penTypeBtn,
+                      selected && styles.penTypeBtnSelected,
+                      pressed && styles.penTypeBtnPressed,
+                    ]}>
+                    <View style={styles.penTypeStrokeWrapper}>
+                      <View
+                        style={[styles.penTypeStroke, penTypeStrokeStyle(t.value)]}
+                      />
+                    </View>
+                    <Text style={styles.penTypeLabel}>{t.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.rowDivider} />
+
             <Pressable
               testID={TEST_IDS.delete}
               onPress={handleDelete}
@@ -368,7 +539,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   panel: {
-    width: 320,
+    // Width is set to fit 9 width-preset buttons in one row without
+    // cramping the tap target. 400 px × ~42 px/button is comfortable
+    // stylus territory on Nomad (1404 px wide screen).
+    width: 400,
     backgroundColor: '#FFFFFF',
     borderRadius: 12,
     borderWidth: 1,
@@ -447,6 +621,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 6,
   },
+  widthRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    // Tighter gap than `row` since 9 buttons need to fit; the larger gap
+    // was tuned for 3–5 buttons and would push overflow off-screen.
+    gap: 3,
+  },
   rowDivider: {
     height: 1,
     backgroundColor: '#E5E5E5',
@@ -454,7 +635,8 @@ const styles = StyleSheet.create({
   },
   widthBtn: {
     flex: 1,
-    paddingVertical: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 2,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 6,
@@ -470,12 +652,45 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
   },
   widthPreview: {
-    width: 24,
+    width: 20,
     backgroundColor: '#000000',
     borderRadius: 2,
   },
   widthLabel: {
-    fontSize: 11,
+    // Smaller font so the mm readout fits a ~40 px wide button.
+    fontSize: 10,
+    color: '#000000',
+    fontWeight: '600',
+  },
+  penTypeBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#CCCCCC',
+    gap: 4,
+  },
+  penTypeBtnSelected: {
+    borderColor: '#000000',
+    borderWidth: 2,
+  },
+  penTypeBtnPressed: {
+    backgroundColor: '#F0F0F0',
+  },
+  penTypeStrokeWrapper: {
+    height: 12,
+    width: '100%',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  penTypeStroke: {
+    width: '100%',
+    backgroundColor: '#000000',
+  },
+  penTypeLabel: {
+    fontSize: 10,
     color: '#000000',
     fontWeight: '600',
   },

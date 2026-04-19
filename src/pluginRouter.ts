@@ -1,18 +1,19 @@
 /**
  * pluginRouter — single source of truth for plugin button press events.
  *
- * The Supernote plugin host dispatches button events (both the main toolbar
- * button id=100 "Shapes" and the lasso-toolbar button id=200 "Shape Options"
- * registered in index.js) into React Native via
- * `PluginManager.registerButtonListener`. We install exactly one listener here
- * and fan out to any subscribers (hooks / components) so that:
+ * The Supernote plugin host dispatches button events (currently only the
+ * main toolbar button id=100 "Shapes" registered in index.js) into React
+ * Native via `PluginManager.registerButtonListener`. We install exactly
+ * one listener here and fan out to any subscribers (hooks / components)
+ * so that:
  *
  *   1. We don't double-register with sn-plugin-lib.
  *   2. Log output stays prefixed with `[PLUGIN_ROUTER]` so logcat stays
  *      searchable.
- *   3. App.tsx can read `getLastButtonEvent()` synchronously on first render
- *      to pick the right initial view, then `subscribeToButtonEvents` for
- *      any subsequent events that arrive during the plugin session.
+ *   3. Components can read `getLastButtonEvent()` synchronously on first
+ *      render to pick the right initial view, then
+ *      `subscribeToButtonEvents` for any subsequent events that arrive
+ *      during the plugin session.
  *
  * Why "last event" instead of an event stream? The plugin UI is started by
  * the button press itself; by the time `App.tsx` mounts the corresponding
@@ -20,11 +21,15 @@
  * `lastButtonEventMsg` when a listener registers inside its 1-second
  * window, which is enough for us to capture the initial trigger into
  * module state before components mount.
+ *
+ * Historically this module also exported BUTTON_ID_SHAPE_OPTIONS=200 for
+ * the contextual "Shape Options" lasso-toolbar button. That button + its
+ * ShapeOptionsPanel routing were removed per user direction 2026-04-18
+ * once ShapePalette grew to own every option it offered.
  */
 import {PluginManager} from 'sn-plugin-lib';
 
 export const BUTTON_ID_TOOLBAR = 100;
-export const BUTTON_ID_SHAPE_OPTIONS = 200;
 
 // Mirror sn-plugin-lib's ButtonEvent shape locally so we don't depend on
 // the library's internal sub-path (which isn't exported in its package

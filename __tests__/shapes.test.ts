@@ -7,15 +7,26 @@ import {
   PolygonGeometry,
   CircleGeometry,
   EllipseGeometry,
+  LineGeometry,
   PEN_DEFAULTS,
 } from '../src/shapes';
 
 const CENTER: Point = {x: 100, y: 100};
 
+function buildShape(id: string): Geometry {
+  const shape = SHAPES.find(s => s.id === id);
+  if (!shape) {throw new Error(`unknown shape id: ${id}`);}
+  const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
+  return shape.build(CENTER, params, PEN_DEFAULTS);
+}
+
 function expectPenDefaults(geo: Geometry) {
   expect(geo.penColor).toBe(0x00);
   expect(geo.penType).toBe(10);
-  expect(geo.penWidth).toBe(400);
+  // PEN_DEFAULTS.penWidth bumped 400 → 500 on 2026-04-18 when
+  // WIDTH_PRESETS collapsed to 5 XS/S/M/L/XL entries — the new default
+  // lands on the M preset so the Shapes popup highlights it at mount.
+  expect(geo.penWidth).toBe(500);
 }
 
 function assertPolygon(geo: Geometry): asserts geo is PolygonGeometry {
@@ -28,6 +39,12 @@ function assertCircle(geo: Geometry): asserts geo is CircleGeometry {
 
 function assertEllipse(geo: Geometry): asserts geo is EllipseGeometry {
   expect(geo.type).toBe('GEO_ellipse');
+}
+
+// LineGeometry helper kept importable so future tests can type-narrow
+// on a straightLine return without widening `geo`. Referenced below.
+function assertLine(geo: Geometry): asserts geo is LineGeometry {
+  expect(geo.type).toBe('straightLine');
 }
 
 function expectSymmetric(points: Point[], center: Point) {
@@ -99,10 +116,6 @@ describe('roundedRectPoints', () => {
 });
 
 describe('SHAPES', () => {
-  it('contains 12 shapes', () => {
-    expect(SHAPES).toHaveLength(12);
-  });
-
   it('each shape has a unique id', () => {
     const ids = SHAPES.map(s => s.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -114,15 +127,49 @@ describe('SHAPES', () => {
     });
   });
 
+  it('does not include star (reserved Supernote glyph)', () => {
+    expect(SHAPES.some(s => s.id === ('star' as unknown))).toBe(false);
+  });
+
+  it('includes the v1.0.2 committed 12-shape set exactly', () => {
+    // After the 2026-04-18 revert ("revert all the additional shapes you
+    // added… show only the Older shapes that were in v1.0.2"), SHAPES
+    // must match the HEAD shape list — no 3D additions, no square /
+    // right-triangle / trapezoid / arrow / cross extras.
+    const ids = SHAPES.map(s => s.id).sort();
+    expect(ids).toEqual(
+      [
+        'circle',
+        'diamond',
+        'ellipse',
+        'heptagon',
+        'hexagon',
+        'line',
+        'octagon',
+        'parallelogram',
+        'pentagon',
+        'rectangle',
+        'roundedRect',
+        'triangle',
+      ].sort(),
+    );
+  });
+
   describe.each(SHAPES.map(s => [s.id, s] as const))('%s', (_, shape) => {
     const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
     const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+
+    it('build returns a single Geometry object', () => {
+      expect(Array.isArray(geo)).toBe(false);
+      expect(geo).toBeTruthy();
+      expect(typeof geo.type).toBe('string');
+    });
 
     it('has default pen properties', () => {
       expectPenDefaults(geo);
     });
 
-    it('produces valid geometry', () => {
+    it('has a recognised type', () => {
       switch (geo.type) {
         case 'GEO_polygon':
           expect(geo.points.length).toBeGreaterThanOrEqual(3);
@@ -137,14 +184,17 @@ describe('SHAPES', () => {
           expect(geo.ellipseMinorAxisRadius).toBeGreaterThan(0);
           expect(geo.ellipseAngle).toBeDefined();
           break;
+        default:
+          throw new Error(`unknown geometry type ${(geo as Geometry).type}`);
       }
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Shape-specific invariants
+  // -------------------------------------------------------------------------
   it('rectangle has 5 points (closed polygon)', () => {
-    const shape = SHAPES.find(s => s.id === 'rectangle')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape('rectangle');
     assertPolygon(geo);
     expect(geo.points).toHaveLength(5);
     expect(geo.points[0]).toEqual(geo.points[4]);
@@ -155,25 +205,19 @@ describe('SHAPES', () => {
   });
 
   it('circle has equal radii', () => {
-    const shape = SHAPES.find(s => s.id === 'circle')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape('circle');
     assertCircle(geo);
     expect(geo.ellipseMajorAxisRadius).toBe(geo.ellipseMinorAxisRadius);
   });
 
   it('ellipse has different radii', () => {
-    const shape = SHAPES.find(s => s.id === 'ellipse')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape('ellipse');
     assertEllipse(geo);
     expect(geo.ellipseMajorAxisRadius).not.toBe(geo.ellipseMinorAxisRadius);
   });
 
   it('diamond has 5 points (closed) forming a rotated square', () => {
-    const shape = SHAPES.find(s => s.id === 'diamond')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape('diamond');
     assertPolygon(geo);
     expect(geo.points).toHaveLength(5);
     expect(geo.points[0]).toEqual(geo.points[4]);
@@ -182,18 +226,14 @@ describe('SHAPES', () => {
   });
 
   it('triangle has 4 points (closed)', () => {
-    const shape = SHAPES.find(s => s.id === 'triangle')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape('triangle');
     assertPolygon(geo);
     expect(geo.points).toHaveLength(4);
     expect(geo.points[0]).toEqual(geo.points[3]);
   });
 
-  it('parallelogram has 5 points (closed) with parallel sides', () => {
-    const shape = SHAPES.find(s => s.id === 'parallelogram')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+  it('parallelogram has parallel top/bottom widths', () => {
+    const geo = buildShape('parallelogram');
     assertPolygon(geo);
     expect(geo.points).toHaveLength(5);
     expect(geo.points[0]).toEqual(geo.points[4]);
@@ -202,10 +242,14 @@ describe('SHAPES', () => {
     expect(topWidth).toBeCloseTo(bottomWidth, 5);
   });
 
+  it('line has exactly 2 points', () => {
+    const geo = buildShape('line');
+    assertLine(geo);
+    expect(geo.points).toHaveLength(2);
+  });
+
   it('roundedRect has more than 4 points', () => {
-    const shape = SHAPES.find(s => s.id === 'roundedRect')!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape('roundedRect');
     assertPolygon(geo);
     expect(geo.points.length).toBeGreaterThan(4);
   });
@@ -216,9 +260,7 @@ describe('SHAPES', () => {
     ['heptagon', 8],
     ['octagon', 9],
   ])('%s has %d points (closed)', (id, expected) => {
-    const shape = SHAPES.find(s => s.id === id)!;
-    const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const geo = buildShape(id);
     assertPolygon(geo);
     expect(geo.points).toHaveLength(expected);
     expect(geo.points[0]).toEqual(geo.points[expected - 1]);

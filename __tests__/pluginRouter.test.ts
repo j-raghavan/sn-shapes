@@ -30,7 +30,6 @@ import {
   getLastButtonEvent,
   __testing__,
   BUTTON_ID_TOOLBAR,
-  BUTTON_ID_SHAPE_OPTIONS,
 } from '../src/pluginRouter';
 
 beforeEach(() => {
@@ -39,9 +38,11 @@ beforeEach(() => {
 });
 
 describe('pluginRouter', () => {
-  it('exports the expected button id constants', () => {
+  it('exports the toolbar button id constant', () => {
+    // Single registered button: id=100 "Shapes". The former id=200
+    // "Shape Options" export was removed when the contextual panel was
+    // folded into ShapePalette itself.
     expect(BUTTON_ID_TOOLBAR).toBe(100);
-    expect(BUTTON_ID_SHAPE_OPTIONS).toBe(200);
   });
 
   it('installs a single listener on first call', () => {
