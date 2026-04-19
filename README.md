@@ -11,11 +11,7 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 
 ## Demo
 
-<video src="https://github.com/j-raghavan/sn-shapes/raw/master/assets/demo/sn-shapes-v1.0.3-demo.mp4" controls width="720">
-  Your browser does not support inline video. <a href="assets/demo/sn-shapes-v1.0.3-demo.mp4">Download the v1.0.3 demo</a>.
-</video>
-
-If the video does not load inline, [watch it directly](assets/demo/sn-shapes-v1.0.3-demo.mp4) or grab it from the [v1.0.3 release page](https://github.com/j-raghavan/sn-shapes/releases/tag/v1.0.3).
+<video src="https://github.com/j-raghavan/sn-shapes/raw/master/assets/demo/sn-shapes-v1.0.3-demo.mp4" controls muted playsinline width="720"></video>
 
 ## What's New in v1.0.3
 
