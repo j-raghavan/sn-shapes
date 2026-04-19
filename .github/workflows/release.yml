@@ -116,6 +116,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json
           if [ -f package-lock.json ]; then git add package-lock.json; fi
+          # buildPlugin.sh rewrites PluginConfig.json's versionName /
+          # versionCode from package.json on every build, so the file
+          # will already reflect the new version on the runner. Commit
+          # it too so the repo's PluginConfig.json doesn't drift out of
+          # sync with the git tag.
+          if [ -f PluginConfig.json ]; then git add PluginConfig.json; fi
           git commit -m "chore(release): $TAG"
           git push origin HEAD:master
           git tag -a "$TAG" -m "$TAG"

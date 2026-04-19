@@ -81,6 +81,78 @@ get_package_info() {
 }
 
 # =========================================================
+# Function: derive_version_code
+# Purpose: Map a semver MAJOR.MINOR.PATCH string to a monotonically
+#          increasing integer, so Supernote's PluginInstallManager can
+#          tell whether a build is "newer" than one already installed
+#          (it compares versionCode numerically).
+#          Scheme: MAJOR*10000 + MINOR*100 + PATCH
+#            1.0.2  -> 10002
+#            1.2.10 -> 10210
+#            2.0.0  -> 20000
+# Params: $1 version string (e.g. "1.0.2")
+# Returns: prints the derived integer versionCode
+# =========================================================
+derive_version_code() {
+    local version="$1"
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$version"
+    echo $(( major * 10000 + minor * 100 + patch ))
+}
+
+# =========================================================
+# Function: sync_plugin_config_version
+# Purpose: Keep PluginConfig.json's versionName/versionCode in lockstep
+#          with package.json. The Supernote firmware reads PluginConfig
+#          .json (not package.json) for the on-device plugin card and
+#          the installer's "update available?" check — if we don't
+#          rewrite these two fields on every build, every APK ships
+#          with whatever was checked in (often the scaffold's 0.1.0).
+#
+#          Runs AFTER get_package_info, BEFORE the "regenerate or skip"
+#          decision below. If PluginConfig.json is absent we skip —
+#          new_plugin_config will create a fresh one with the right
+#          version straight from PACKAGE_VERSION.
+# Params: $1 project root
+# Returns: rewrites $project_root/PluginConfig.json in place
+# =========================================================
+sync_plugin_config_version() {
+    local project_root="$1"
+    local config_file="$project_root/PluginConfig.json"
+    if [[ ! -f "$config_file" ]]; then
+        return 0
+    fi
+
+    local version_code
+    version_code="$(derive_version_code "$PACKAGE_VERSION")"
+
+    if command -v jq >/dev/null 2>&1; then
+        local tmp
+        tmp="$(mktemp)"
+        jq --arg v "$PACKAGE_VERSION" --arg c "$version_code" \
+            '.versionName = $v | .versionCode = $c' \
+            "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$config_file" "$PACKAGE_VERSION" "$version_code" <<'PY'
+import json, sys
+path, version, code = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, encoding='utf-8-sig') as f:
+    cfg = json.load(f)
+cfg['versionName'] = version
+cfg['versionCode'] = code
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+PY
+    else
+        write_color_output "Please install jq or python3 to sync PluginConfig.json" "Red"
+        exit 1
+    fi
+
+    write_color_output "Synced PluginConfig.json: versionName=$PACKAGE_VERSION, versionCode=$version_code" "Green"
+}
+
+# =========================================================
 # Function: new_plugin_config
 # Purpose: Create PluginConfig.json with base fields
 # Params: $1 plugin_id; $2 project root
@@ -91,6 +163,9 @@ new_plugin_config() {
     local project_root="$2"
     local config_file="$project_root/PluginConfig.json"
 
+    local version_code
+    version_code="$(derive_version_code "$PACKAGE_VERSION")"
+
     write_color_output "Creating PluginConfig.json..." "Blue"
     cat > "$config_file" <<EOF
 {
@@ -98,7 +173,7 @@ new_plugin_config() {
   "desc": "$PACKAGE_DESCRIPTION",
   "iconPath": "",
   "versionName": "$PACKAGE_VERSION",
-  "versionCode": "1",
+  "versionCode": "$version_code",
   "pluginID": "$plugin_id",
   "pluginKey": "$PACKAGE_NAME",
   "jsMainPath": "index"
@@ -674,6 +749,12 @@ main() {
 
     local project_root="${1:-$(pwd)}"
     get_package_info "$project_root"
+
+    # Pull PluginConfig.json's versionName/versionCode forward from
+    # package.json before anything downstream touches the config. Without
+    # this, the on-device plugin card stays pinned to whatever the
+    # scaffold seeded (e.g. 0.1.0) forever.
+    sync_plugin_config_version "$project_root"
 
     local gen_dir
     gen_dir="$(ensure_build_generated_dir "$project_root")"
