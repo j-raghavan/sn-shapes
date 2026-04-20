@@ -25,6 +25,7 @@ import {create, act, ReactTestRenderer} from 'react-test-renderer';
 import StrokePreview, {
   TEST_IDS,
   penWidthToPreviewPx,
+  penWidthToSampleBarPx,
   penTypeOpacity,
   resolvePreviewGeometry,
 } from '../src/StrokePreview';
@@ -76,6 +77,53 @@ describe('penWidthToPreviewPx', () => {
     expect(penWidthToPreviewPx(NaN)).toBe(2);
     expect(penWidthToPreviewPx(-100)).toBe(2);
     expect(penWidthToPreviewPx(Infinity)).toBe(2);
+  });
+});
+
+describe('penWidthToSampleBarPx', () => {
+  // Sample-bar scale is deliberately tighter than penWidthToPreviewPx —
+  // the bar is a proportion indicator next to a 38-px icon, not a
+  // standalone shape renderer. Presets should map to 1/2/3/4/5 px so XS
+  // and XL stay visibly distinct while the bar no longer reads as
+  // disproportionately thicker than the on-device stroke.
+  it('maps each WIDTH_PRESETS value to a distinct px step', () => {
+    expect(penWidthToSampleBarPx(100)).toBe(1); // XS
+    expect(penWidthToSampleBarPx(300)).toBe(2); // S
+    expect(penWidthToSampleBarPx(500)).toBe(3); // M
+    expect(penWidthToSampleBarPx(700)).toBe(4); // L
+    expect(penWidthToSampleBarPx(900)).toBe(5); // XL
+  });
+
+  it('is strictly monotonic across the preset range', () => {
+    const presetValues = [100, 300, 500, 700, 900];
+    const heights = presetValues.map(penWidthToSampleBarPx);
+    for (let i = 1; i < heights.length; i++) {
+      expect(heights[i]).toBeGreaterThan(heights[i - 1]);
+    }
+  });
+
+  it('clamps absurdly thick pens to the sample-bar ceiling (6 px)', () => {
+    // The bar is proportional to the icon (~38 px); no matter how thick
+    // the pen is the bar stays under MAX_SAMPLE_BAR_PX so it doesn't
+    // take over the column.
+    expect(penWidthToSampleBarPx(10000)).toBe(6);
+  });
+
+  it('returns the floor for invalid input', () => {
+    expect(penWidthToSampleBarPx(undefined)).toBe(1);
+    expect(penWidthToSampleBarPx(NaN)).toBe(1);
+    expect(penWidthToSampleBarPx(-100)).toBe(1);
+    expect(penWidthToSampleBarPx(Infinity)).toBe(1);
+    expect(penWidthToSampleBarPx(0)).toBe(1);
+  });
+
+  it('renders noticeably thinner than the fallback-line scale at every preset', () => {
+    // Regression guard: the whole point of the rescale is that the bar
+    // stays on-page-proportional. If someone re-unifies the two scales,
+    // this assertion catches it.
+    for (const v of [100, 300, 500, 700, 900]) {
+      expect(penWidthToSampleBarPx(v)).toBeLessThan(penWidthToPreviewPx(v));
+    }
   });
 });
 
@@ -345,8 +393,11 @@ describe('StrokePreview', () => {
       });
       const thinStyle = flatten(findByTestID(thin, TEST_IDS.strokeSample).props.style);
       const thickStyle = flatten(findByTestID(thick, TEST_IDS.strokeSample).props.style);
-      expect(thinStyle.height as number).toBe(3);   // penWidthToPreviewPx(100)
-      expect(thickStyle.height as number).toBe(23); // penWidthToPreviewPx(900)
+      // Sample bar uses penWidthToSampleBarPx (on-page-proportional)
+      // rather than penWidthToPreviewPx (fallback-line-renderer scale):
+      // 100 → 1 px, 900 → 5 px under the new 1/200 conversion.
+      expect(thinStyle.height as number).toBe(1);
+      expect(thickStyle.height as number).toBe(5);
       expect(thickStyle.height as number).toBeGreaterThan(thinStyle.height as number);
     });
 

@@ -65,16 +65,20 @@ import {
   ImageSourcePropType,
   ScrollView,
 } from 'react-native';
-import {PluginCommAPI, PluginManager, PluginFileAPI} from 'sn-plugin-lib';
+import {
+  PluginCommAPI,
+  PluginManager,
+  PluginFileAPI,
+} from 'sn-plugin-lib';
 import {
   SHAPES,
   Shape,
   ShapeId,
   PenStyle,
   PEN_DEFAULTS,
-  Geometry,
   ShapeCategory,
   CATEGORY_LABELS,
+  CATEGORY_ORDER,
   shapesInCategory,
   nextCategory,
 } from './shapes';
@@ -119,6 +123,10 @@ export const TEST_IDS = {
   // see file header for rationale.
   widthRow: 'shapes-width-row',
   colorRow: 'shapes-color-row',
+  // Centered tagline at the bottom of the panel (added 2026-04-20). Kept
+  // as its own testID so layout tests can assert order without text-content
+  // matching, which is brittle if we ever localise.
+  footer: 'shapes-footer',
   // Carousel header (added 2026-04-20) that cycles shape groups — prev
   // arrow, group label, next arrow. Tests target these testIDs to assert
   // wrap-around and auto-select-first-in-group invariants without peeking
@@ -139,7 +147,8 @@ export const TEST_IDS = {
  * the grid selection exactly.
  */
 export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
-  rectangle: require('../assets/shapes/shape_square.png'),
+  // Basic
+  rectangle: require('../assets/shapes/shape_rectangle.png'),
   circle: require('../assets/shapes/shape_circle.png'),
   roundedRect: require('../assets/shapes/shape_roundedRect.png'),
   ellipse: require('../assets/shapes/shape_ellipse.png'),
@@ -151,43 +160,101 @@ export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
   octagon: require('../assets/shapes/shape_octagon.png'),
   line: require('../assets/shapes/shape_line.png'),
   parallelogram: require('../assets/shapes/shape_parallelogram.png'),
+  // Arrows
+  blockArrow: require('../assets/shapes/shape_blockArrow.png'),
+  doubleArrow: require('../assets/shapes/shape_doubleArrow.png'),
+  thickArrow: require('../assets/shapes/shape_thickArrow.png'),
+  ballArrow: require('../assets/shapes/shape_ballArrow.png'),
+  chevronTailArrow: require('../assets/shapes/shape_chevronTailArrow.png'),
+  refreshArrow: require('../assets/shapes/shape_refreshArrow.png'),
+  // Flowchart
+  flowchartPreparation: require('../assets/shapes/shape_flowchartPreparation.png'),
+  flowchartDocument: require('../assets/shapes/shape_flowchartDocument.png'),
+  flowchartTerminator: require('../assets/shapes/shape_flowchartTerminator.png'),
+  flowchartManualInput: require('../assets/shapes/shape_flowchartManualInput.png'),
+  // Decorative
+  certificate: require('../assets/shapes/shape_certificate.png'),
+  ribbon: require('../assets/shapes/shape_ribbon.png'),
+  banner: require('../assets/shapes/shape_banner.png'),
+  starburst: require('../assets/shapes/shape_starburst.png'),
+  awardBadge: require('../assets/shapes/shape_awardBadge.png'),
+  // Others
+  plus: require('../assets/shapes/shape_plus.png'),
+  lightning: require('../assets/shapes/shape_lightning.png'),
+  trapezoid: require('../assets/shapes/shape_trapezoid.png'),
 };
 
 // Fixed panel width so layout is deterministic (Nomad is 1404 px wide —
-// a 336 px panel leaves ample room for the main page view on the right).
-// Panel was shrunk to ~60% of the earlier 560-px layout per user
-// directive 2026-04-18 ("reduce the Popup so that the popup is about 60%
-// of what it is right now"). All internal geometry (padding, gaps, cell
-// size, preview frame, etc.) was scaled by the same factor; font sizes
-// were floored at 9-10 px so the popup stays readable on e-ink.
-const PANEL_WIDTH = 336;
-const PANEL_PADDING = 8;
+// a 404 px panel leaves ample room for the main page view on the right).
+// Sizing history:
+//   • v1.0.1: 560 px (roomy but dominated the screen on Manta).
+//   • v1.0.3: 336 px (60 % of v1.0.1) — compact but user flagged it as
+//     "cramped" once the carousel + decorative category shipped.
+//   • v1.0.4: 404 px (+20 % from 336) per user directive 2026-04-20. All
+//     internal geometry (padding, gaps, cell size, preview frame, font
+//     sizes) scales by the same 1.2 factor so proportions are preserved.
+const PANEL_WIDTH = 404;
+const PANEL_PADDING = 10;
 // Gap between shapes column and preview column in Row 1 only.
-const ROW1_GAP = 8;
-// Fixed right-column width in Row 1. 108 px fits the 38-px preview icon
-// plus the width-sample bar plus padding.
-const PREVIEW_COLUMN_WIDTH = 108;
+const ROW1_GAP = 10;
+// Fixed right-column width in Row 1. 130 px fits the 38-px preview icon
+// plus the width-sample bar plus padding (was 108 px at the 336-px panel
+// size, scaled by 1.2 alongside the panel bump).
+const PREVIEW_COLUMN_WIDTH = 130;
 const SHAPES_COLUMN_WIDTH =
   PANEL_WIDTH - PANEL_PADDING * 2 - ROW1_GAP - PREVIEW_COLUMN_WIDTH;
 
 const GRID_COLS = 4;
 const GRID_GAP = 4;
 
-// Cell sizing: thumbnail + fixed padding on each side. We render the
-// thumbnail at 30 px (below the PNG authoring resolution of 48 px — RN
-// downscales cleanly without the aliasing we'd see if we went *above*
-// native) and give 8 px padding per side.
-//
-// Padding was reduced 14 → 8 px as part of the 2026-04-18 overall ~60%
-// popup shrink; the prior 14 px came from an earlier pass that tightened
-// from an original ~18 px.
-const CELL_PADDING_PX = 8;
-const THUMBNAIL_SIZE = 30;
-const CELL_SIZE = THUMBNAIL_SIZE + CELL_PADDING_PX * 2; // 46
-// Sanity: if anyone bumps GRID_COLS the fixed CELL_SIZE still has to
-// fit inside SHAPES_COLUMN_WIDTH. At GRID_COLS=4 we need
-// 4*46 + 3*4 = 196 ≤ SHAPES_COLUMN_WIDTH (204) — fits comfortably, with
-// ~8 px of breathing room absorbed by the column's native centering.
+// Cell sizing: thumbnail + fixed padding on each side. Thumbnails render
+// at 36 px (below the PNG authoring resolution of 48 px — RN downscales
+// cleanly without the aliasing we'd see going *above* native) with 10 px
+// padding per side. Both values were scaled by 1.2 from the v1.0.3 pair
+// (30 / 8) as part of the 2026-04-20 panel upsize.
+const CELL_PADDING_PX = 10;
+const THUMBNAIL_SIZE = 36;
+const CELL_SIZE = THUMBNAIL_SIZE + CELL_PADDING_PX * 2; // 56
+// Sanity: GRID_COLS*CELL_SIZE + (GRID_COLS-1)*GRID_GAP must fit inside
+// SHAPES_COLUMN_WIDTH. At GRID_COLS=4 that's 4*56 + 3*4 = 236 ≤
+// SHAPES_COLUMN_WIDTH (244) — 8 px of breathing room absorbed by the
+// column's native centering.
+
+// Breathing-room padding added below the last row so the final row of
+// thumbnails doesn't butt up against the grid's inner edge.
+const GRID_VERTICAL_PADDING_PX = 8;
+
+/**
+ * Rows needed to show the largest category without scrolling.
+ *
+ * Computed at module load time from the authoritative SHAPES + category
+ * data so the grid's fixed height auto-adjusts when shapes are added or
+ * removed. Prior revision hard-coded 188 px for the current 12-shape
+ * basic category, which would silently start scrolling if someone added
+ * a 13th basic shape — users would assume the new shape "didn't ship"
+ * because the grid height wouldn't grow to reveal it. Deriving from
+ * CATEGORY_ORDER means a new category is a zero-line change here.
+ */
+const MAX_GRID_ROWS = Math.max(
+  ...CATEGORY_ORDER.map(c =>
+    Math.ceil(shapesInCategory(c).length / GRID_COLS),
+  ),
+);
+
+/**
+ * Fixed shapes-grid height. We pin this rather than using maxHeight so
+ * the overall popup footprint stays constant as the user cycles
+ * categories — otherwise switching basic (3 rows) → decorative (1 row)
+ * visibly shrinks the panel and bounces the preview / pickers / footer
+ * up the screen on every ◀/▶ tap (user flagged this 2026-04-20).
+ *
+ * Smaller categories leave predictable whitespace below their last row;
+ * the stable overall layout matters more than filling every pixel.
+ */
+const GRID_HEIGHT_PX =
+  MAX_GRID_ROWS * CELL_SIZE +
+  (MAX_GRID_ROWS - 1) * GRID_GAP +
+  GRID_VERTICAL_PADDING_PX;
 
 // Local narrow type for sn-plugin-lib responses. The SDK declares its
 // methods as returning the generic `Object` type, so TS doesn't know
@@ -224,25 +291,24 @@ async function resolvePageSize(): Promise<{width: number; height: number}> {
 
 /**
  * Insert a shape at the page center with the user's chosen style baked
- * in. Primitive shapes (rectangle, circle, polygons, …) build to a
- * single Geometry; composites (cube, cylinder, arrow-with-head, …) build
- * to an array. We issue one `insertGeometry` per primitive in order.
+ * in. Every shape in SHAPES builds exactly one Geometry (v1.0.4), so
+ * the insert is always a single `PluginCommAPI.insertGeometry` call —
+ * the inserted element respects the user's PenStyle (colour + width +
+ * pen type), stays crisp at any zoom, and remains editable as a single
+ * ink stroke. We set `showLassoAfterInsert` so the user can immediately
+ * reposition without a second tap.
  *
- * Only the LAST primitive gets `showLassoAfterInsert = true`:
- *   - Firmware (Chauvet 3.27.41) doesn't support multi-element lasso
- *     selection, so setting the flag on each primitive would just cycle
- *     the selection until the final primitive's lasso wins.
- *   - Shape definitions order composites so the primary silhouette is
- *     emitted last (see `ShapeBuildResult` docblock in shapes.ts), so
- *     "last-primitive lasso" = "useful lasso" in practice.
+ * The earlier hybrid image-insert path for multi-Geometry composites
+ * (cube, cylinder, axes, …) was removed in v1.0.4. Firmware
+ * (Chauvet 3.27.41) has no grouping primitive and the `insertImage`
+ * fallback we'd been using baked the stroke into a PNG — so colour
+ * and width sliders, rotation, and single-element lasso all stopped
+ * applying. Offering those shapes half-working read as "these controls
+ * silently do nothing here"; dropping them is the simpler, honest fix.
  *
- * Fail-fast semantics: any per-primitive failure surfaces as a thrown
- * error that the overlay handler catches and shows in the banner. The
- * caller is then responsible for any partial-state cleanup — today the
- * palette doesn't roll back successful inserts on a downstream failure
- * because `insertGeometry` has no paired `removeGeometry` API. Composite
- * shapes either land fully or the user ends up with a partial composite
- * they can lasso-delete manually; the error banner tells them why.
+ * Fail-fast: any failure surfaces as a thrown error that the overlay
+ * handler catches and shows in the banner. Insert is atomic on the
+ * firmware side, so there's no partial-state cleanup to worry about.
  */
 async function insertShape(
   shape: Shape,
@@ -254,50 +320,32 @@ async function insertShape(
   const params = Object.fromEntries(
     shape.parameters.map(p => [p.id, p.defaultValue]),
   );
-  const built = shape.build(center, params, style);
-  const primitives: Geometry[] = Array.isArray(built) ? [...built] : [built];
-  if (primitives.length === 0) {
-    throw new Error(`shape ${shape.id} produced no geometries`);
-  }
-
-  const lastIdx = primitives.length - 1;
-  for (let i = 0; i < primitives.length; i++) {
-    primitives[i].showLassoAfterInsert = i === lastIdx;
-    const res = (await PluginCommAPI.insertGeometry(
-      primitives[i],
-    )) as ApiRes<unknown>;
-    if (!res?.success) {
-      console.error(
-        `insertGeometry failed at primitive ${i + 1}/${primitives.length}:`,
-        JSON.stringify(res),
-      );
-      throw new Error(res?.error?.message ?? 'insertGeometry failed');
-    }
+  const geometry = shape.build(center, params, style);
+  // Auto-lasso the element so users can immediately drag it — the
+  // element IS the shape.
+  geometry.showLassoAfterInsert = true;
+  const res = (await PluginCommAPI.insertGeometry(geometry)) as ApiRes<unknown>;
+  if (!res?.success) {
+    console.error('insertGeometry failed:', JSON.stringify(res));
+    throw new Error(res?.error?.message ?? 'insertGeometry failed');
   }
 }
 
 const ERROR_DISPLAY_MS = 2000;
 
 /**
- * Pick a representative geometry type for the StrokePreview fallback.
- * Builds the shape with default params + the current style at the page
- * origin, just to read its `type` field (GEO_polygon / GEO_circle /
+ * Pick the geometry type for the StrokePreview fallback. Builds the
+ * shape with default params + the current style at the page origin,
+ * just to read its `type` field (GEO_polygon / GEO_circle /
  * GEO_ellipse / straightLine). Pure — no side effects. Only consulted
  * when the preview can't render from the PNG icon for some reason.
- *
- * For composite shapes (array return) we use the LAST primitive — by
- * convention composites order the primary silhouette last (see
- * `ShapeBuildResult` in shapes.ts), so this reads the most visually
- * representative type for the preview.
  */
 function previewShapeType(shape: Shape, style: PenStyle): string | undefined {
   const CENTER = {x: 0, y: 0};
   const params = Object.fromEntries(
     shape.parameters.map(p => [p.id, p.defaultValue]),
   );
-  const built = shape.build(CENTER, params, style);
-  const primitive = Array.isArray(built) ? built[built.length - 1] : built;
-  return primitive?.type;
+  return shape.build(CENTER, params, style).type;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,12 +521,12 @@ export default function ShapePalette() {
                 <Pressable
                   testID={TEST_IDS.groupPrev}
                   onPress={() => cycleCategory(-1)}
-                  hitSlop={6}
+                  hitSlop={8}
                   style={({pressed}) => [
                     styles.groupArrow,
                     pressed && styles.groupArrowPressed,
                   ]}>
-                  <Text style={styles.groupArrowText}>‹</Text>
+                  <Text style={styles.groupArrowText}>◀</Text>
                 </Pressable>
                 <Text
                   testID={TEST_IDS.groupLabel}
@@ -489,12 +537,12 @@ export default function ShapePalette() {
                 <Pressable
                   testID={TEST_IDS.groupNext}
                   onPress={() => cycleCategory(1)}
-                  hitSlop={6}
+                  hitSlop={8}
                   style={({pressed}) => [
                     styles.groupArrow,
                     pressed && styles.groupArrowPressed,
                   ]}>
-                  <Text style={styles.groupArrowText}>›</Text>
+                  <Text style={styles.groupArrowText}>▶</Text>
                 </Pressable>
               </View>
               <ScrollView
@@ -522,7 +570,9 @@ export default function ShapePalette() {
 
           <View style={styles.divider} />
 
-          {/* Row 2 — Stroke Width (full-width). */}
+          {/* Row 2 — Stroke Width (full-width). v1.0.4 dropped the
+              composite/sticker path, so every shape now honours this
+              row — no per-shape "(fixed)" ghosting needed. */}
           <View testID={TEST_IDS.widthRow} style={styles.section}>
             <Text style={styles.sectionLabel}>Stroke Width</Text>
             <View style={styles.widthRow}>
@@ -577,6 +627,13 @@ export default function ShapePalette() {
             </View>
           </View>
 
+          <View style={styles.divider} />
+
+          {/* Centred tagline carried over from the contrib branch
+              (2026-04-20). Non-interactive — purely a community wink. */}
+          <Text testID={TEST_IDS.footer} style={styles.footer}>
+            Made with ❤️ for those who write.
+          </Text>
         </View>
       </Pressable>
     </Pressable>
@@ -674,16 +731,16 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   title: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: 'bold',
     color: '#000000',
   },
   closeBtn: {
     position: 'absolute',
     right: PANEL_PADDING,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     borderWidth: 1.5,
     borderColor: '#000000',
     alignItems: 'center',
@@ -693,7 +750,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
   },
   closeText: {
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: 'bold',
     color: '#000000',
   },
@@ -711,7 +768,7 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: '#FFFFFF',
-    fontSize: 10,
+    fontSize: 12,
     textAlign: 'center',
   },
   body: {
@@ -726,43 +783,50 @@ const styles = StyleSheet.create({
   shapesColumn: {
     width: SHAPES_COLUMN_WIDTH,
   },
-  // Carousel header (‹  Group Label  ›) sits above the shapes grid in
-  // the shapes column. Kept compact (~22 px tall) so Row 1's overall
-  // height stays close to the v1.0.3 layout — the preview column's icon
-  // + stroke sample still dominates visually, the group header reads as
-  // an unobtrusive "you are here" indicator.
+  // Carousel header (◀  Group Label  ▶) sits above the shapes grid in
+  // the shapes column. Per user feedback 2026-04-20 the earlier bordered
+  // circle around each arrow is dropped: the filled-triangle glyph itself
+  // reads as an affordance, and the circle's border competed with a
+  // glyph whose ink bounds are not symmetric around its advance-width —
+  // which meant a visibly off-centre triangle inside the circle on e-ink.
+  // Tap area is preserved via hitSlop; the glyph font size is bumped so
+  // the bare triangle still reads at arm's length.
   groupHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    height: 22,
+    height: 28,
     marginBottom: 4,
   },
   groupArrow: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 1,
-    borderColor: '#000000',
+    // No border / background / fixed frame: the triangle glyph is the
+    // affordance. A small padding block keeps the Pressable press-state
+    // visible without shifting the triangle off the row's vertical axis.
+    paddingHorizontal: 6,
+    paddingVertical: 2,
     alignItems: 'center',
     justifyContent: 'center',
   },
   groupArrowPressed: {
-    backgroundColor: '#F0F0F0',
+    // Subtle grey flash so taps register on e-ink (which compresses the
+    // upper-grey range). No circle means no border to colour-invert, so
+    // a background fill is the only press affordance available.
+    backgroundColor: '#D8D8D8',
+    borderRadius: 4,
   },
   groupArrowText: {
-    fontSize: 14,
-    lineHeight: 16,
+    // Bumped from 14 → 20 now that the triangle stands alone. At 20 px
+    // the glyph reads as a chunky arrowhead comparable to the prior
+    // 32 px circle's overall silhouette, without the centring quirks of
+    // nesting a glyph inside a round border.
+    fontSize: 20,
     fontWeight: 'bold',
     color: '#000000',
-    // Nudge the chevron glyph up slightly so it optically centers inside
-    // the circle — most fonts render ‹/› with extra baseline padding.
-    marginTop: -1,
   },
   groupLabel: {
     flex: 1,
     textAlign: 'center',
-    fontSize: 11,
+    fontSize: 14,
     fontWeight: '700',
     color: '#000000',
   },
@@ -774,11 +838,13 @@ const styles = StyleSheet.create({
     borderLeftColor: '#CCCCCC',
     paddingLeft: ROW1_GAP,
   },
-  // Cap the grid height so the 12 shapes (3 rows × 4 cols) stay within
-  // a predictable band — still scrollable if a future revision adds more.
-  // 3 rows × (CELL_SIZE 46 + GRID_GAP 4) = 150, +6 breathing room.
+  // Fixed grid height so the panel footprint stays constant as the user
+  // cycles categories — the `height` is derived from the largest
+  // category via GRID_HEIGHT_PX so this block stays correct when shapes
+  // are added or removed. Rationale for the fixed-height approach (vs
+  // maxHeight) in the GRID_HEIGHT_PX doc comment above.
   gridScroll: {
-    maxHeight: 156,
+    height: GRID_HEIGHT_PX,
   },
   gridContainer: {
     paddingVertical: 2,
@@ -819,7 +885,7 @@ const styles = StyleSheet.create({
     paddingBottom: 2,
   },
   sectionLabel: {
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: '600',
     color: '#000000',
     marginBottom: 4,
@@ -853,12 +919,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
   },
   widthPreview: {
-    width: 12,
+    width: 14,
     backgroundColor: '#000000',
     borderRadius: 1,
   },
   widthLabel: {
-    fontSize: 9,
+    fontSize: 11,
     color: '#000000',
     fontWeight: '600',
   },
@@ -880,15 +946,26 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
   },
   colorSwatch: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#000000',
   },
   colorLabel: {
-    fontSize: 9,
+    fontSize: 11,
     color: '#000000',
     fontWeight: '600',
+  },
+  // Centred tagline sitting below the pickers. Muted grey + small size so
+  // it doesn't compete with the interactive rows for attention — reads as
+  // a signature, not a button. Padding matches the panel's rhythm
+  // (PANEL_PADDING) so it aligns with the content columns above.
+  footer: {
+    textAlign: 'center',
+    fontSize: 10,
+    color: '#555555',
+    paddingTop: 8,
+    paddingHorizontal: PANEL_PADDING,
   },
 });

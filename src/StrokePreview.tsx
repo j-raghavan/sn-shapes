@@ -70,16 +70,33 @@ type Props = {
   iconSource?: ImageSourcePropType;
 };
 
-// Empirical conversion used only for the preview. penWidth is in
-// micrometres (penWidth=400 → 0.40 mm on-device). For display we want a
-// range that reads distinctly from "hairline" at 0.10 mm to "brush" at
-// 0.90 mm without eating the whole preview area. 1 px per 40 μm lands us
-// at 2.5 px … 22.5 px across the preset range. The ratio is preserved
-// across the 2026-04-18 popup shrink — only MAX_STROKE_PX came down
-// (48 → 24) so absurdly thick pens can't outgrow the scaled preview.
+// Empirical conversion used by the FALLBACK geometry rendering (when no
+// iconSource is supplied, the preview draws the whole shape — including
+// a line-mode straightLine — as a plain View). penWidth is in
+// micrometres (penWidth=400 → 0.40 mm on-device). This scale keeps the
+// fallback shape visibly "stroked" across the 0.10 → 0.90 mm preset
+// range: 1 px per 40 μm lands at 2.5 … 22.5 px. It deliberately
+// exaggerates absolute thickness because the fallback's whole point is
+// to show the geometry *as* a stroke — the sample bar below uses a
+// tighter, on-page-proportional scale (see `penWidthToSampleBarPx`).
 const STROKE_PX_PER_PENWIDTH = 1 / 40;
 const MIN_STROKE_PX = 2;
 const MAX_STROKE_PX = 24;
+
+// Sample-bar conversion. The PNG icon (38 px tall) is a ~5× miniature of
+// the default 200-page-unit shape. On-device, a 0.50 mm stroke on that
+// shape is ~3 % of the shape's width — faithfully scaled that would be
+// ~1 preview-px, which is too close to invisible for the bar to serve
+// its purpose (showing XS→XL differences at a glance).
+//
+// We exaggerate only slightly: 1 px per 200 μm maps the five presets to
+// 1 / 2 / 3 / 4 / 5 preview-px. That's still proportional to the icon
+// (5/38 ≈ 13 % at XL vs the prior 23/38 ≈ 60 % that made the bar read
+// wildly thicker than the actual on-device stroke) while keeping every
+// preset visibly distinct from its neighbours.
+const SAMPLE_BAR_PX_PER_PENWIDTH = 1 / 200;
+const MIN_SAMPLE_BAR_PX = 1;
+const MAX_SAMPLE_BAR_PX = 6;
 
 // Preview frame + shape sizing. Tuned so the widest fallback shape
 // (ellipse at SHAPE_SIZE * ELLIPSE_ASPECT) fits inside a compact right
@@ -108,6 +125,26 @@ export function penWidthToPreviewPx(penWidth: number | undefined): number {
   const raw = penWidth * STROKE_PX_PER_PENWIDTH;
   const rounded = Math.round(raw);
   return Math.max(MIN_STROKE_PX, Math.min(MAX_STROKE_PX, rounded));
+}
+
+/**
+ * Preview-px height for the width-sample bar that lives below the icon.
+ * Uses a tighter scale than `penWidthToPreviewPx` so the bar reads at
+ * roughly the same proportion the user will actually see on-page
+ * (stroke-vs-shape), rather than the exaggerated scale the fallback
+ * shape renderer needs to stay legible.
+ *
+ * Guards invalid input (undefined / NaN / non-finite / ≤ 0) by returning
+ * the floor; same semantics as `penWidthToPreviewPx` for callers that
+ * feed through an unvalidated penWidth.
+ */
+export function penWidthToSampleBarPx(penWidth: number | undefined): number {
+  if (typeof penWidth !== 'number' || !Number.isFinite(penWidth) || penWidth <= 0) {
+    return MIN_SAMPLE_BAR_PX;
+  }
+  const raw = penWidth * SAMPLE_BAR_PX_PER_PENWIDTH;
+  const rounded = Math.round(raw);
+  return Math.max(MIN_SAMPLE_BAR_PX, Math.min(MAX_SAMPLE_BAR_PX, rounded));
 }
 
 function penTypeLabel(penType: number | undefined): string {
@@ -206,6 +243,7 @@ export default function StrokePreview({
   iconSource,
 }: Props) {
   const strokePx = penWidthToPreviewPx(penWidth);
+  const sampleBarPx = penWidthToSampleBarPx(penWidth);
   const color = penColorToSwatch(penColor);
   const meta = `${penTypeLabel(penType)} · ${formatPenWidthMm(penWidth)}`;
   const opacity = penTypeOpacity(penType);
@@ -261,10 +299,10 @@ export default function StrokePreview({
           style={[
             styles.strokeSampleBar,
             {
-              height: strokePx,
+              height: sampleBarPx,
               backgroundColor: color,
               opacity,
-              borderRadius: Math.min(strokePx / 2, 12),
+              borderRadius: Math.min(sampleBarPx / 2, 12),
             },
           ]}
         />
@@ -284,8 +322,8 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
   },
   shapeName: {
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: 12,
+    fontWeight: '700',
     color: '#000000',
     marginBottom: 5,
     textAlign: 'center',
@@ -309,12 +347,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   strokeSampleWrapper: {
-    // Narrow band below the icon that hosts the width-sample bar. Kept
-    // small (fixed max height) so it doesn't steal vertical space from
-    // the icon, but wide enough for a visibly thickening bar at 0.90 mm
-    // (≈18 px under the 1/50 conversion). Centre-aligned to match the
-    // icon's horizontal centre.
-    height: MAX_STROKE_PX + 4,
+    // Narrow band below the icon that hosts the width-sample bar. Height
+    // tracks MAX_SAMPLE_BAR_PX with a few pixels of breathing room, which
+    // keeps the whole preview column compact now that the bar itself is
+    // on-page-proportional (1-6 px) rather than exaggerated (2-24 px).
+    // Centre-aligned to match the icon's horizontal centre.
+    height: MAX_SAMPLE_BAR_PX + 6,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 5,

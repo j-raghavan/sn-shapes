@@ -36,7 +36,11 @@ import {
   COLOR_PRESETS,
 } from '../src/ShapeOptionsPanel';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
-import {PluginCommAPI, PluginFileAPI, PluginManager} from 'sn-plugin-lib';
+import {
+  PluginCommAPI,
+  PluginFileAPI,
+  PluginManager,
+} from 'sn-plugin-lib';
 
 function flushPromises() {
   return new Promise(resolve =>
@@ -217,15 +221,16 @@ describe('ShapePalette (merged popup)', () => {
   it('places the shape cells inside the shapes column (not the preview column)', async () => {
     const tree = await mountPalette();
     const shapesCol = findByTestID(tree, TEST_IDS.shapesColumn);
-    // Every shape cell should be reachable from inside the shapes column.
-    for (const s of SHAPES) {
+    // Since v1.0.4 the grid only renders shapes in the active category,
+    // so we scope the assertion to the Basic category (the landing tab).
+    for (const s of shapesInCategory('basic')) {
       expect(
         shapesCol.findAllByProps({testID: TEST_IDS.cell(s.id)}).length,
       ).toBeGreaterThanOrEqual(1);
     }
     const previewCol = findByTestID(tree, TEST_IDS.previewColumn);
     // Preview column must not contain any shape cells.
-    for (const s of SHAPES) {
+    for (const s of shapesInCategory('basic')) {
       expect(
         previewCol.findAllByProps({testID: TEST_IDS.cell(s.id)}),
       ).toHaveLength(0);
@@ -358,12 +363,54 @@ describe('ShapePalette (merged popup)', () => {
     expect(geo.penType).toBe(PEN_DEFAULTS.penType);
   });
 
-  it('sets showLassoAfterInsert on the inserted geometry', async () => {
+  it('auto-lassoes a single-primitive shape after insert', async () => {
+    // Single-primitive shapes (rectangle, circle, polygon, …) contain the
+    // entire shape in one Geometry, so auto-lassoing matches user intent.
     const tree = await mountPalette();
     await selectShape(tree, 'rectangle');
     await pressInsert(tree);
     const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
     expect(geo.showLassoAfterInsert).toBe(true);
+  });
+
+  it('inserts every shape exclusively through insertGeometry (no bitmap path)', async () => {
+    // v1.0.4 regression guard: the composite/bitmap path was removed.
+    // Every shape — including the post-v1.0.3 additions in non-Basic
+    // categories — now authors a single Geometry and commits through
+    // insertGeometry. A future accidental re-introduction of a
+    // multi-geometry composite would show up here as the insert count
+    // going below SHAPES.length (commits silently dropped) or as an
+    // extra reference to a bitmap-API mock that no longer exists.
+    const tree = await mountPalette();
+    // Sample one shape from every category (covers arrows / flowchart
+    // / decorative / others without looping through all 24).
+    const representatives: ShapeId[] = CATEGORY_ORDER.map(c =>
+      shapesInCategory(c)[0].id,
+    );
+    for (let i = 0; i < representatives.length; i++) {
+      const id = representatives[i];
+      // Walk the carousel to this shape's category, then select + commit.
+      for (let j = 0; j < i; j++) {
+        await act(async () => {
+          findByTestID(tree, TEST_IDS.groupNext).props.onPress();
+          await flushPromises();
+        });
+      }
+      await selectShape(tree, id);
+      await pressInsert(tree);
+      // Reset to basic for the next iteration (pressInsert closes the
+      // popup on success via mocked closePluginView; selection still
+      // lives in component state). Walk back by cycling prev.
+      for (let j = 0; j < i; j++) {
+        await act(async () => {
+          findByTestID(tree, TEST_IDS.groupPrev).props.onPress();
+          await flushPromises();
+        });
+      }
+    }
+    expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(
+      representatives.length,
+    );
   });
 
   // -------------------------------------------------------------------------
