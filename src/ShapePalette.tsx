@@ -66,7 +66,18 @@ import {
   ScrollView,
 } from 'react-native';
 import {PluginCommAPI, PluginManager, PluginFileAPI} from 'sn-plugin-lib';
-import {SHAPES, Shape, ShapeId, PenStyle, PEN_DEFAULTS} from './shapes';
+import {
+  SHAPES,
+  Shape,
+  ShapeId,
+  PenStyle,
+  PEN_DEFAULTS,
+  Geometry,
+  ShapeCategory,
+  CATEGORY_LABELS,
+  shapesInCategory,
+  nextCategory,
+} from './shapes';
 import {
   WIDTH_PRESETS,
   COLOR_PRESETS,
@@ -108,6 +119,14 @@ export const TEST_IDS = {
   // see file header for rationale.
   widthRow: 'shapes-width-row',
   colorRow: 'shapes-color-row',
+  // Carousel header (added 2026-04-20) that cycles shape groups — prev
+  // arrow, group label, next arrow. Tests target these testIDs to assert
+  // wrap-around and auto-select-first-in-group invariants without peeking
+  // at the rendered tree's Text children.
+  groupHeader: 'shapes-group-header',
+  groupPrev: 'shapes-group-prev',
+  groupNext: 'shapes-group-next',
+  groupLabel: 'shapes-group-label',
 } as const;
 
 /**
@@ -205,8 +224,25 @@ async function resolvePageSize(): Promise<{width: number; height: number}> {
 
 /**
  * Insert a shape at the page center with the user's chosen style baked
- * in. Single insertGeometry call (auto-lassos the new shape on the host).
- * Throws on any API failure; caller is responsible for showing an error.
+ * in. Primitive shapes (rectangle, circle, polygons, …) build to a
+ * single Geometry; composites (cube, cylinder, arrow-with-head, …) build
+ * to an array. We issue one `insertGeometry` per primitive in order.
+ *
+ * Only the LAST primitive gets `showLassoAfterInsert = true`:
+ *   - Firmware (Chauvet 3.27.41) doesn't support multi-element lasso
+ *     selection, so setting the flag on each primitive would just cycle
+ *     the selection until the final primitive's lasso wins.
+ *   - Shape definitions order composites so the primary silhouette is
+ *     emitted last (see `ShapeBuildResult` docblock in shapes.ts), so
+ *     "last-primitive lasso" = "useful lasso" in practice.
+ *
+ * Fail-fast semantics: any per-primitive failure surfaces as a thrown
+ * error that the overlay handler catches and shows in the banner. The
+ * caller is then responsible for any partial-state cleanup — today the
+ * palette doesn't roll back successful inserts on a downstream failure
+ * because `insertGeometry` has no paired `removeGeometry` API. Composite
+ * shapes either land fully or the user ends up with a partial composite
+ * they can lasso-delete manually; the error banner tells them why.
  */
 async function insertShape(
   shape: Shape,
@@ -218,12 +254,25 @@ async function insertShape(
   const params = Object.fromEntries(
     shape.parameters.map(p => [p.id, p.defaultValue]),
   );
-  const geometry = shape.build(center, params, style);
-  geometry.showLassoAfterInsert = true;
-  const res = (await PluginCommAPI.insertGeometry(geometry)) as ApiRes<unknown>;
-  if (!res?.success) {
-    console.error('insertGeometry failed:', JSON.stringify(res));
-    throw new Error(res?.error?.message ?? 'insertGeometry failed');
+  const built = shape.build(center, params, style);
+  const primitives: Geometry[] = Array.isArray(built) ? [...built] : [built];
+  if (primitives.length === 0) {
+    throw new Error(`shape ${shape.id} produced no geometries`);
+  }
+
+  const lastIdx = primitives.length - 1;
+  for (let i = 0; i < primitives.length; i++) {
+    primitives[i].showLassoAfterInsert = i === lastIdx;
+    const res = (await PluginCommAPI.insertGeometry(
+      primitives[i],
+    )) as ApiRes<unknown>;
+    if (!res?.success) {
+      console.error(
+        `insertGeometry failed at primitive ${i + 1}/${primitives.length}:`,
+        JSON.stringify(res),
+      );
+      throw new Error(res?.error?.message ?? 'insertGeometry failed');
+    }
   }
 }
 
@@ -235,13 +284,20 @@ const ERROR_DISPLAY_MS = 2000;
  * origin, just to read its `type` field (GEO_polygon / GEO_circle /
  * GEO_ellipse / straightLine). Pure — no side effects. Only consulted
  * when the preview can't render from the PNG icon for some reason.
+ *
+ * For composite shapes (array return) we use the LAST primitive — by
+ * convention composites order the primary silhouette last (see
+ * `ShapeBuildResult` in shapes.ts), so this reads the most visually
+ * representative type for the preview.
  */
 function previewShapeType(shape: Shape, style: PenStyle): string | undefined {
   const CENTER = {x: 0, y: 0};
   const params = Object.fromEntries(
     shape.parameters.map(p => [p.id, p.defaultValue]),
   );
-  return shape.build(CENTER, params, style).type;
+  const built = shape.build(CENTER, params, style);
+  const primitive = Array.isArray(built) ? built[built.length - 1] : built;
+  return primitive?.type;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +318,17 @@ export default function ShapePalette() {
   const [selectedId, setSelectedId] = useState<ShapeId>('rectangle');
   const [style, setStyle] = useState<PenStyle>(PEN_DEFAULTS);
 
+  // Carousel state. The palette shows one category at a time; prev/next
+  // arrows in the header cycle CATEGORY_ORDER with wrap-around. Default
+  // category lines up with the default selectedId ('rectangle' ∈ basic)
+  // so the initial render is self-consistent without any post-mount work.
+  const [selectedCategory, setSelectedCategory] =
+    useState<ShapeCategory>('basic');
+
+  // ScrollView ref so we can reset to y=0 whenever the category changes —
+  // users scrolled halfway down Basic shouldn't land halfway down Arrows.
+  const gridScrollRef = useRef<ScrollView>(null);
+
   useEffect(() => {
     resolvePageSize().then(({width, height}) => {
       setPageWidth(width);
@@ -271,6 +338,14 @@ export default function ShapePalette() {
       if (errorTimerRef.current) {clearTimeout(errorTimerRef.current);}
     };
   }, []);
+
+  // Shapes shown in the grid right now — filtered by the current carousel
+  // group. Memoised on `selectedCategory` so the filter cost (O(SHAPES))
+  // only runs on group change, not on every stroke-width tap.
+  const visibleShapes = useMemo(
+    () => shapesInCategory(selectedCategory),
+    [selectedCategory],
+  );
 
   const selectedShape = useMemo(
     () => SHAPES.find(s => s.id === selectedId) ?? SHAPES[0],
@@ -304,6 +379,34 @@ export default function ShapePalette() {
   const handleColorPress = useCallback((value: number) => {
     if (insertingRef.current) {return;}
     setStyle(prev => ({...prev, penColor: value}));
+  }, []);
+
+  /**
+   * Advance the carousel to the previous (-1) or next (+1) group.
+   *
+   * Side-effects bundled here so each arrow tap is atomic from the user's
+   * POV:
+   *   1. Switch the visible category (wraps via `nextCategory`).
+   *   2. Auto-select the first shape of the new group so the preview and
+   *      commit path have a valid selection. Otherwise the previously
+   *      selected shape would remain "selected" but invisible (not in
+   *      the filtered grid), which reads as broken.
+   *   3. Reset the shapes ScrollView to the top — a user scrolled halfway
+   *      into Basic shouldn't land halfway into Arrows.
+   *
+   * Ignored while an insert is in flight, matching the other handlers.
+   */
+  const cycleCategory = useCallback((direction: 1 | -1) => {
+    if (insertingRef.current) {return;}
+    setSelectedCategory(prev => {
+      const next = nextCategory(prev, direction);
+      const firstInNext = shapesInCategory(next)[0];
+      if (firstInNext) {setSelectedId(firstInNext.id);}
+      // Schedule the scroll reset for after the state flush. scrollTo on
+      // a not-yet-updated ScrollView is a no-op but safe.
+      gridScrollRef.current?.scrollTo({y: 0, animated: false});
+      return next;
+    });
   }, []);
 
   /**
@@ -365,9 +468,41 @@ export default function ShapePalette() {
           {/* Row 1 — shapes grid + preview side by side. */}
           <View style={styles.firstRow}>
             <View testID={TEST_IDS.shapesColumn} style={styles.shapesColumn}>
-              <ScrollView style={styles.gridScroll} contentContainerStyle={styles.gridContainer}>
+              {/* Carousel header: ‹  Group Label  › */}
+              <View testID={TEST_IDS.groupHeader} style={styles.groupHeader}>
+                <Pressable
+                  testID={TEST_IDS.groupPrev}
+                  onPress={() => cycleCategory(-1)}
+                  hitSlop={6}
+                  style={({pressed}) => [
+                    styles.groupArrow,
+                    pressed && styles.groupArrowPressed,
+                  ]}>
+                  <Text style={styles.groupArrowText}>‹</Text>
+                </Pressable>
+                <Text
+                  testID={TEST_IDS.groupLabel}
+                  style={styles.groupLabel}
+                  numberOfLines={1}>
+                  {CATEGORY_LABELS[selectedCategory]}
+                </Text>
+                <Pressable
+                  testID={TEST_IDS.groupNext}
+                  onPress={() => cycleCategory(1)}
+                  hitSlop={6}
+                  style={({pressed}) => [
+                    styles.groupArrow,
+                    pressed && styles.groupArrowPressed,
+                  ]}>
+                  <Text style={styles.groupArrowText}>›</Text>
+                </Pressable>
+              </View>
+              <ScrollView
+                ref={gridScrollRef}
+                style={styles.gridScroll}
+                contentContainerStyle={styles.gridContainer}>
                 <ShapeGrid
-                  shapes={SHAPES}
+                  shapes={visibleShapes}
                   selectedId={selectedId}
                   onSelect={handleShapeTap}
                 />
@@ -508,12 +643,21 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    // `alignItems` is the cross axis for a row flex container, so this
+    // vertically centers the panel inside the full-page overlay. Prior
+    // to 2026-04-20 the panel was pinned near the top (`top: '2%'`,
+    // `alignItems: 'flex-start'`) which looked correct on Nomad but
+    // stranded the panel well above the puzzle-piece plugin icon on
+    // Manta. Centering gets us close to the icon's Y on both form
+    // factors without the SDK needing to expose the button rect.
+    alignItems: 'center',
     backgroundColor: 'transparent',
   },
   panel: {
+    // Horizontally anchored alongside the left toolbar so it reads as
+    // "attached to" the Plugins icon rather than floating in space.
+    // Vertical position comes from the container's alignItems above.
     marginLeft: 90,
-    top: '2%',
     backgroundColor: '#FFFFFF',
     borderRadius: 8,
     borderWidth: 1,
@@ -581,6 +725,46 @@ const styles = StyleSheet.create({
   },
   shapesColumn: {
     width: SHAPES_COLUMN_WIDTH,
+  },
+  // Carousel header (‹  Group Label  ›) sits above the shapes grid in
+  // the shapes column. Kept compact (~22 px tall) so Row 1's overall
+  // height stays close to the v1.0.3 layout — the preview column's icon
+  // + stroke sample still dominates visually, the group header reads as
+  // an unobtrusive "you are here" indicator.
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    height: 22,
+    marginBottom: 4,
+  },
+  groupArrow: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupArrowPressed: {
+    backgroundColor: '#F0F0F0',
+  },
+  groupArrowText: {
+    fontSize: 14,
+    lineHeight: 16,
+    fontWeight: 'bold',
+    color: '#000000',
+    // Nudge the chevron glyph up slightly so it optically centers inside
+    // the circle — most fonts render ‹/› with extra baseline padding.
+    marginTop: -1,
+  },
+  groupLabel: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#000000',
   },
   previewColumn: {
     width: PREVIEW_COLUMN_WIDTH,

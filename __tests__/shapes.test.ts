@@ -9,15 +9,28 @@ import {
   EllipseGeometry,
   LineGeometry,
   PEN_DEFAULTS,
+  CATEGORY_ORDER,
+  CATEGORY_LABELS,
+  ShapeCategory,
+  shapeCategories,
+  shapesInCategory,
+  nextCategory,
 } from '../src/shapes';
 
 const CENTER: Point = {x: 100, y: 100};
 
+/**
+ * Build a shape by id and unwrap the `ShapeBuildResult` to a single
+ * Geometry for test-level invariants (point counts, centering, etc.).
+ * Composite shapes order the primary silhouette last; callers that need
+ * per-primitive access should drive `shape.build` directly.
+ */
 function buildShape(id: string): Geometry {
   const shape = SHAPES.find(s => s.id === id);
   if (!shape) {throw new Error(`unknown shape id: ${id}`);}
   const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-  return shape.build(CENTER, params, PEN_DEFAULTS);
+  const built = shape.build(CENTER, params, PEN_DEFAULTS);
+  return Array.isArray(built) ? built[built.length - 1] : built;
 }
 
 function expectPenDefaults(geo: Geometry) {
@@ -131,13 +144,17 @@ describe('SHAPES', () => {
     expect(SHAPES.some(s => s.id === ('star' as unknown))).toBe(false);
   });
 
-  it('includes the v1.0.2 committed 12-shape set exactly', () => {
-    // After the 2026-04-18 revert ("revert all the additional shapes you
-    // added… show only the Older shapes that were in v1.0.2"), SHAPES
-    // must match the HEAD shape list — no 3D additions, no square /
-    // right-triangle / trapezoid / arrow / cross extras.
-    const ids = SHAPES.map(s => s.id).sort();
-    expect(ids).toEqual(
+  it('Basic category contains the v1.0.3 12-shape set exactly', () => {
+    // Carry-over regression guard from v1.0.2 / v1.0.3: the Basic
+    // category must still contain precisely the original 12 primitive
+    // shapes. v1.0.4 introduces other categories (Arrows, 3D, Flowchart,
+    // Others) via the `category` field, but this test pins the Basic
+    // set so an accidental re-tagging (e.g. moving rectangle out of
+    // Basic when cross-listing it in Flowchart) is caught immediately.
+    const basicIds = shapesInCategory('basic')
+      .map(s => s.id)
+      .sort();
+    expect(basicIds).toEqual(
       [
         'circle',
         'diamond',
@@ -157,36 +174,52 @@ describe('SHAPES', () => {
 
   describe.each(SHAPES.map(s => [s.id, s] as const))('%s', (_, shape) => {
     const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
+    const built = shape.build(CENTER, params, PEN_DEFAULTS);
+    // `ShapeBuildResult` is Geometry | readonly Geometry[]. All current
+    // shapes return a single Geometry; composites (cube, cylinder,
+    // arrow-with-head) land later as arrays. Normalise here so the
+    // existing invariants apply primitive-by-primitive regardless.
+    const primitives: readonly Geometry[] = Array.isArray(built) ? built : [built];
+    const primary = primitives[primitives.length - 1];
 
-    it('build returns a single Geometry object', () => {
-      expect(Array.isArray(geo)).toBe(false);
-      expect(geo).toBeTruthy();
-      expect(typeof geo.type).toBe('string');
+    it('build returns at least one Geometry', () => {
+      expect(primitives.length).toBeGreaterThanOrEqual(1);
+      expect(primary).toBeTruthy();
+      expect(typeof primary.type).toBe('string');
     });
 
-    it('has default pen properties', () => {
-      expectPenDefaults(geo);
+    it('every primitive carries default pen properties', () => {
+      primitives.forEach(p => expectPenDefaults(p));
     });
 
-    it('has a recognised type', () => {
-      switch (geo.type) {
-        case 'GEO_polygon':
-          expect(geo.points.length).toBeGreaterThanOrEqual(3);
-          break;
-        case 'straightLine':
-          expect(geo.points).toHaveLength(2);
-          break;
-        case 'GEO_circle':
-        case 'GEO_ellipse':
-          expect(geo.ellipseCenterPoint).toBeDefined();
-          expect(geo.ellipseMajorAxisRadius).toBeGreaterThan(0);
-          expect(geo.ellipseMinorAxisRadius).toBeGreaterThan(0);
-          expect(geo.ellipseAngle).toBeDefined();
-          break;
-        default:
-          throw new Error(`unknown geometry type ${(geo as Geometry).type}`);
-      }
+    it('every primitive has a recognised type', () => {
+      primitives.forEach(geo => {
+        switch (geo.type) {
+          case 'GEO_polygon':
+            expect(geo.points.length).toBeGreaterThanOrEqual(3);
+            break;
+          case 'straightLine':
+            expect(geo.points).toHaveLength(2);
+            break;
+          case 'GEO_circle':
+          case 'GEO_ellipse':
+            expect(geo.ellipseCenterPoint).toBeDefined();
+            expect(geo.ellipseMajorAxisRadius).toBeGreaterThan(0);
+            expect(geo.ellipseMinorAxisRadius).toBeGreaterThan(0);
+            expect(geo.ellipseAngle).toBeDefined();
+            break;
+          default:
+            throw new Error(`unknown geometry type ${(geo as Geometry).type}`);
+        }
+      });
+    });
+
+    it('declares at least one valid category', () => {
+      const categories = shapeCategories(shape);
+      expect(categories.length).toBeGreaterThanOrEqual(1);
+      categories.forEach(c => {
+        expect(CATEGORY_ORDER).toContain(c);
+      });
     });
   });
 
@@ -264,5 +297,80 @@ describe('SHAPES', () => {
     assertPolygon(geo);
     expect(geo.points).toHaveLength(expected);
     expect(geo.points[0]).toEqual(geo.points[expected - 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Category model (v1.0.4)
+// ---------------------------------------------------------------------------
+
+describe('ShapeCategory model', () => {
+  it('CATEGORY_ORDER has a label for every entry', () => {
+    // Record<ShapeCategory, string> already enforces this at compile
+    // time; the runtime check catches accidental mutations / casts.
+    CATEGORY_ORDER.forEach(c => {
+      expect(CATEGORY_LABELS[c]).toBeTruthy();
+      expect(typeof CATEGORY_LABELS[c]).toBe('string');
+    });
+  });
+
+  it('CATEGORY_ORDER entries are unique', () => {
+    expect(new Set(CATEGORY_ORDER).size).toBe(CATEGORY_ORDER.length);
+  });
+
+  it('shapeCategories normalises a scalar category to a 1-item list', () => {
+    const shape = SHAPES.find(s => s.id === 'rectangle')!;
+    const result = shapeCategories(shape);
+    expect(result).toEqual(['basic']);
+  });
+
+  it('shapesInCategory("basic") returns all v1.0.3 primitives', () => {
+    const ids = shapesInCategory('basic').map(s => s.id);
+    expect(ids).toContain('rectangle');
+    expect(ids).toContain('circle');
+    expect(ids).toContain('line');
+    expect(ids).toHaveLength(12);
+  });
+
+  it('shapesInCategory preserves SHAPES ordering', () => {
+    const basic = shapesInCategory('basic');
+    const basicSubsetFromShapes = SHAPES.filter(s =>
+      shapeCategories(s).includes('basic'),
+    );
+    expect(basic.map(s => s.id)).toEqual(basicSubsetFromShapes.map(s => s.id));
+  });
+
+  it('shapesInCategory does not mutate SHAPES', () => {
+    const beforeLen = SHAPES.length;
+    const result = shapesInCategory('basic');
+    result.push(SHAPES[0]); // mutate the returned array
+    expect(SHAPES).toHaveLength(beforeLen);
+  });
+
+  it('nextCategory advances forward with wrap-around', () => {
+    // basic → arrows → 3d → flowchart → others → basic
+    const forward: ShapeCategory[] = [];
+    let c: ShapeCategory = 'basic';
+    for (let i = 0; i < CATEGORY_ORDER.length; i++) {
+      c = nextCategory(c, 1);
+      forward.push(c);
+    }
+    // After N steps forward we're back at the start.
+    expect(forward[forward.length - 1]).toBe('basic');
+  });
+
+  it('nextCategory reverses with wrap-around', () => {
+    // basic -1 → others (last element)
+    expect(nextCategory('basic', -1)).toBe(
+      CATEGORY_ORDER[CATEGORY_ORDER.length - 1],
+    );
+    // others +1 → basic (wraps)
+    expect(nextCategory(CATEGORY_ORDER[CATEGORY_ORDER.length - 1], 1)).toBe(
+      'basic',
+    );
+  });
+
+  it('nextCategory throws on an unknown category', () => {
+    expect(() => nextCategory('bogus' as ShapeCategory, 1)).toThrow();
   });
 });

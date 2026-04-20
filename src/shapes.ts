@@ -62,6 +62,35 @@ export type ShapeId =
   | 'line'
   | 'parallelogram';
 
+/**
+ * Shape groups surfaced in the palette's carousel header. The palette
+ * renders shapes one category at a time and the user flips between them
+ * with prev/next arrows — less visual clutter than a tab bar and fits the
+ * e-ink page-flip idiom users already know from the firmware's reader UI.
+ *
+ * CATEGORY_ORDER is the authoritative cycle order. Adding a new category
+ * is a two-line change (extend the union + append to CATEGORY_ORDER);
+ * CATEGORY_LABELS is a Record<ShapeCategory, string> (not Partial) so
+ * TypeScript catches missing labels at compile time.
+ */
+export type ShapeCategory = 'basic' | 'arrows' | '3d' | 'flowchart' | 'others';
+
+export const CATEGORY_ORDER: readonly ShapeCategory[] = [
+  'basic',
+  'arrows',
+  '3d',
+  'flowchart',
+  'others',
+];
+
+export const CATEGORY_LABELS: Record<ShapeCategory, string> = {
+  basic: 'Basic Shapes',
+  arrows: 'Arrows',
+  '3d': '3D Shapes',
+  flowchart: 'Flowchart',
+  others: 'Others',
+};
+
 export type ShapeParameter = {
   readonly id: string;
   readonly label: string;
@@ -72,11 +101,33 @@ export type ShapeParameter = {
   readonly unit: 'px' | 'deg' | '%';
 };
 
+/**
+ * Build output: a single Geometry for primitive shapes (rectangle,
+ * circle, …), or a tuple of Geometries for composites (cube, cylinder,
+ * arrow-with-head, …). The firmware's `insertGeometry` accepts one
+ * Geometry per call, so the palette's insert path loops over the array.
+ *
+ * Composite ordering convention: emit *hidden* or *decorative* primitives
+ * first and the *primary silhouette* last. Firmware can only auto-lasso
+ * one element after insert (multi-selection is unsupported as of Chauvet
+ * 3.27.41), so the caller applies `showLassoAfterInsert = true` to the
+ * LAST primitive only. Keeping the main outline last means the user's
+ * lasso lands on something they'd actually want to drag.
+ */
+export type ShapeBuildResult = Geometry | readonly Geometry[];
+
 export type Shape = {
   readonly id: ShapeId;
   readonly label: string;
+  /**
+   * A shape can live in multiple groups (e.g. the rectangle is both a
+   * Basic primitive and a Flowchart "process" box). Store as a single
+   * value when there's only one group, or an array when cross-listed —
+   * the palette normalises via `shapeCategories(shape)`.
+   */
+  readonly category: ShapeCategory | readonly ShapeCategory[];
   readonly parameters: readonly ShapeParameter[];
-  build: (center: Point, params: Record<string, number>, style: PenStyle) => Geometry;
+  build: (center: Point, params: Record<string, number>, style: PenStyle) => ShapeBuildResult;
 };
 
 export const PEN_DEFAULTS: PenStyle = {
@@ -172,6 +223,7 @@ export const SHAPES: Shape[] = [
   {
     id: 'rectangle',
     label: 'Rectangle',
+    category: 'basic',
     parameters: [
       { id: 'width',
         label: 'Width (px)',
@@ -204,6 +256,7 @@ export const SHAPES: Shape[] = [
   {
     id: 'circle',
     label: 'Circle',
+    category: 'basic',
     parameters: [
       { id: 'radius',
         label: 'Radius (px)',
@@ -222,6 +275,7 @@ export const SHAPES: Shape[] = [
   {
     id: 'roundedRect',
     label: 'Rounded Rectangle',
+    category: 'basic',
     parameters: [
       {
         id: 'width',
@@ -260,6 +314,7 @@ export const SHAPES: Shape[] = [
   {
     id: 'ellipse',
     label: 'Ellipse',
+    category: 'basic',
     parameters: [
       {
         id: 'radiusX',
@@ -282,6 +337,7 @@ export const SHAPES: Shape[] = [
   {
     id: 'line',
     label: 'Line',
+    category: 'basic',
     parameters: [
       {
         id: 'length',
@@ -313,6 +369,7 @@ export const SHAPES: Shape[] = [
   {
     id: 'parallelogram',
     label: 'Parallelogram',
+    category: 'basic',
     parameters: [
       {
         id: 'width',
@@ -355,6 +412,7 @@ export const SHAPES: Shape[] = [
   ...REGULAR_POLYGONS.map(([id, label, sides]): Shape => ({
     id,
     label,
+    category: 'basic',
     parameters: [
       {
         id: 'radius',
@@ -381,3 +439,48 @@ export const SHAPES: Shape[] = [
     ),
   })),
 ];
+
+// ---------------------------------------------------------------------------
+// Category helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalise `shape.category` to a list. `category` can be either a
+ * single `ShapeCategory` or an array when the shape is cross-listed in
+ * multiple groups (e.g. a rectangle is both "basic" and, later, a
+ * "flowchart" process box). Callers that need membership checks should
+ * go through this helper rather than `Array.isArray` inline, so the
+ * multi-category convention lives in one place.
+ */
+export function shapeCategories(shape: Shape): readonly ShapeCategory[] {
+  const c = shape.category;
+  return Array.isArray(c) ? c : [c as ShapeCategory];
+}
+
+/**
+ * Shapes that belong to the given category, preserving SHAPES ordering.
+ * Used by the palette to render the filtered grid for the current
+ * carousel group. Returns a fresh array so callers can safely sort /
+ * slice without mutating SHAPES.
+ */
+export function shapesInCategory(category: ShapeCategory): Shape[] {
+  return SHAPES.filter(s => shapeCategories(s).includes(category));
+}
+
+/**
+ * Produce the next category in CATEGORY_ORDER, wrapping at the ends.
+ * `direction` of +1 advances to the next group; -1 goes to the previous.
+ * Pure so carousel navigation can be unit-tested without rendering.
+ *
+ * Throws if `current` is not in CATEGORY_ORDER — callers are expected to
+ * pass a known category, so a silent fallback would mask bugs.
+ */
+export function nextCategory(
+  current: ShapeCategory,
+  direction: 1 | -1,
+): ShapeCategory {
+  const idx = CATEGORY_ORDER.indexOf(current);
+  if (idx < 0) {throw new Error(`unknown category: ${current}`);}
+  const n = CATEGORY_ORDER.length;
+  return CATEGORY_ORDER[(idx + direction + n) % n];
+}

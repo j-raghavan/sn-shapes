@@ -22,12 +22,19 @@ import ShapePalette, {
   DEFAULT_PAGE_WIDTH,
   SHAPE_ICONS,
 } from '../src/ShapePalette';
-import {SHAPES, ShapeId} from '../src/shapes';
+import {
+  SHAPES,
+  ShapeId,
+  PEN_DEFAULTS,
+  CATEGORY_ORDER,
+  CATEGORY_LABELS,
+  shapesInCategory,
+  nextCategory,
+} from '../src/shapes';
 import {
   WIDTH_PRESETS,
   COLOR_PRESETS,
 } from '../src/ShapeOptionsPanel';
-import {PEN_DEFAULTS} from '../src/shapes';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
 import {PluginCommAPI, PluginFileAPI, PluginManager} from 'sn-plugin-lib';
 
@@ -41,8 +48,15 @@ function findByTestID(tree: ReactTestRenderer, testID: string) {
   return tree.root.findByProps({testID});
 }
 
+/**
+ * Every cell currently visible in the grid. Since v1.0.4 the grid only
+ * renders shapes in the active category; basic is the landing category
+ * so this resolves to every Basic shape on mount.
+ */
 function findAllCells(tree: ReactTestRenderer) {
-  return SHAPES.map(s => findByTestID(tree, TEST_IDS.cell(s.id)));
+  return shapesInCategory('basic').map(s =>
+    findByTestID(tree, TEST_IDS.cell(s.id)),
+  );
 }
 
 let consoleErrorSpy: jest.SpyInstance;
@@ -105,9 +119,23 @@ describe('ShapePalette (merged popup)', () => {
     expect(tree.toJSON()).toBeTruthy();
   });
 
-  it('renders a cell for every shape', async () => {
+  it('renders a cell for every shape in the landing (basic) category', async () => {
     const tree = await mountPalette();
-    expect(findAllCells(tree)).toHaveLength(SHAPES.length);
+    const basicCount = shapesInCategory('basic').length;
+    expect(findAllCells(tree)).toHaveLength(basicCount);
+  });
+
+  it('does NOT render cells for shapes outside the active category', async () => {
+    // Since SHAPES may host more groups than just 'basic', shapes in
+    // other categories must be absent from the initial (basic) grid. We
+    // pick the first non-basic shape (if any) and assert it has no cell.
+    const tree = await mountPalette();
+    const foreign = SHAPES.find(s => {
+      const cats = Array.isArray(s.category) ? s.category : [s.category];
+      return !cats.includes('basic');
+    });
+    if (!foreign) {return;}  // no other categories yet — assertion vacuous
+    expect(() => findByTestID(tree, TEST_IDS.cell(foreign.id))).toThrow();
   });
 
   it('does NOT render a dedicated Insert button (overlay-to-commit design)', async () => {
@@ -452,6 +480,95 @@ describe('ShapePalette (merged popup)', () => {
       jest.advanceTimersByTime(5000);
     });
     expect(() => findByTestID(tree, TEST_IDS.error)).toThrow();
+  });
+
+  // -------------------------------------------------------------------------
+  // Carousel group navigation (v1.0.4)
+  // -------------------------------------------------------------------------
+  async function tapGroupNext(tree: ReactTestRenderer) {
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.groupNext).props.onPress();
+      await flushPromises();
+    });
+  }
+  async function tapGroupPrev(tree: ReactTestRenderer) {
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.groupPrev).props.onPress();
+      await flushPromises();
+    });
+  }
+
+  it('renders the group carousel header with prev / next arrows and a label', async () => {
+    const tree = await mountPalette();
+    expect(findByTestID(tree, TEST_IDS.groupHeader)).toBeTruthy();
+    expect(findByTestID(tree, TEST_IDS.groupPrev)).toBeTruthy();
+    expect(findByTestID(tree, TEST_IDS.groupNext)).toBeTruthy();
+    // Lands on the Basic group by default — label text must match.
+    expect(findByTestID(tree, TEST_IDS.groupLabel).props.children).toBe(
+      CATEGORY_LABELS.basic,
+    );
+  });
+
+  it('next arrow advances the label through CATEGORY_ORDER (with wrap)', async () => {
+    const tree = await mountPalette();
+    let current = 'basic' as const;
+    // Walk the full cycle; after N taps we must land on the starting label.
+    for (let i = 0; i < CATEGORY_ORDER.length; i++) {
+      await tapGroupNext(tree);
+      current = nextCategory(current, 1);
+      expect(findByTestID(tree, TEST_IDS.groupLabel).props.children).toBe(
+        CATEGORY_LABELS[current],
+      );
+    }
+    expect(findByTestID(tree, TEST_IDS.groupLabel).props.children).toBe(
+      CATEGORY_LABELS.basic,
+    );
+  });
+
+  it('prev arrow from the landing group wraps to the last group', async () => {
+    const tree = await mountPalette();
+    await tapGroupPrev(tree);
+    const last = CATEGORY_ORDER[CATEGORY_ORDER.length - 1];
+    expect(findByTestID(tree, TEST_IDS.groupLabel).props.children).toBe(
+      CATEGORY_LABELS[last],
+    );
+  });
+
+  it('navigation does NOT trigger an insertGeometry call', async () => {
+    // Regression: cycling groups is a pure-UI action and must not touch
+    // the firmware. Overlay taps still commit, but arrow taps don't.
+    const tree = await mountPalette();
+    await tapGroupNext(tree);
+    await tapGroupPrev(tree);
+    await tapGroupNext(tree);
+    expect(PluginCommAPI.insertGeometry).not.toHaveBeenCalled();
+  });
+
+  it('ignores group-nav taps while an insert is in flight', async () => {
+    // Parity with other handlers: once commit is underway, UI is frozen.
+    let resolveInsert: () => void;
+    (PluginCommAPI.insertGeometry as jest.Mock).mockImplementationOnce(
+      () => new Promise<void>(r => { resolveInsert = r; }),
+    );
+    const tree = await mountPalette();
+
+    act(() => {
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // Attempted group advance during in-flight commit — must be a no-op.
+    await tapGroupNext(tree);
+    expect(findByTestID(tree, TEST_IDS.groupLabel).props.children).toBe(
+      CATEGORY_LABELS.basic,
+    );
+
+    await act(async () => {
+      if (resolveInsert) {resolveInsert();}
+      await flushPromises();
+    });
   });
 
   it('ignores rapid double-tap of the overlay while a commit is in progress', async () => {
