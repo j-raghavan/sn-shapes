@@ -99,7 +99,15 @@ jobs:
       - name: Bump package.json (runner only)
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-        run: npm version "$VERSION" --no-git-tag-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT=$(npm pkg get version | tr -d '"')
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "package.json already at $VERSION; skipping npm version."
+          else
+            npm version "$VERSION" --no-git-tag-version
+          fi
 
       - name: Build plugin
         run: |
@@ -122,8 +130,12 @@ jobs:
           # it too so the repo's PluginConfig.json doesn't drift out of
           # sync with the git tag.
           if [ -f PluginConfig.json ]; then git add PluginConfig.json; fi
-          git commit -m "chore(release): $TAG"
-          git push origin HEAD:master
+          if git diff --cached --quiet; then
+            echo "No version-bump diff to commit (repo already at $VERSION); skipping commit+push."
+          else
+            git commit -m "chore(release): $TAG"
+            git push origin HEAD:master
+          fi
           git tag -a "$TAG" -m "$TAG"
           git push origin "$TAG"
 
