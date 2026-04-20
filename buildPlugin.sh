@@ -550,6 +550,85 @@ ensure_build_generated_dir() {
 }
 
 # =========================================================
+# Function: ensure_node_modules_platform
+# Purpose: Guard against a node_modules tree that was installed on a
+#          DIFFERENT OS/arch than the host we're building on. Happens
+#          most often when the project is synced between a Linux
+#          sandbox (or CI container) and a developer's Mac — npm's
+#          optional native binaries (esbuild, @napi-rs/canvas, …) are
+#          keyed to platform+arch and throw opaque "You installed
+#          esbuild for another platform" errors at runtime.
+#
+#          Detection uses esbuild as the canonical indicator:
+#            - Does node_modules/@esbuild/<platform>-<arch>/ exist?
+#          If not, node_modules was installed elsewhere and every
+#          tsx-driven step (render-icons, bundle …) will fail. We fix
+#          it by blowing away node_modules and re-running `npm install`
+#          so every native dep — not just esbuild — comes back fresh
+#          for this host. package-lock.json is preserved so the tree
+#          stays reproducible.
+#
+#          Fails the build if `npm install` itself fails; we'd rather
+#          stop than let downstream commands die with a confusing
+#          esbuild stacktrace.
+# Params: $1 project root
+# Returns: exits on npm install failure; no-op when node_modules is
+#          absent (fresh clone before first install) or esbuild isn't
+#          yet present (pre-install state)
+# =========================================================
+ensure_node_modules_platform() {
+    local project_root="$1"
+    local esbuild_dir="$project_root/node_modules/@esbuild"
+    [[ ! -d "$esbuild_dir" ]] && return 0
+
+    if ! command -v node >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local expected
+    expected="$(node -p 'process.platform + "-" + process.arch' 2>/dev/null || true)"
+    [[ -z "$expected" ]] && return 0
+
+    if [[ -d "$esbuild_dir/$expected" ]]; then
+        return 0
+    fi
+
+    write_color_output "node_modules has no esbuild binary for $expected (installed on a different host); reinstalling..." "Yellow"
+    (cd "$project_root" && rm -rf node_modules && npm install) \
+        || { write_color_output "npm install failed during platform-mismatch recovery" "Red"; exit 1; }
+    write_color_output "node_modules reinstalled for $expected" "Green"
+}
+
+# =========================================================
+# Function: render_shape_icons
+# Purpose: Regenerate the palette PNG icons under assets/shapes/ by
+#          driving each shape's build() from src/shapes.ts through a
+#          Node rasteriser (scripts/render-icons.ts). Keeping icon
+#          generation in the build pipeline means every checkout +
+#          build — dev or CI — ships icons that match their on-page
+#          geometry (WYSIWYG), without anyone needing to remember to
+#          run a separate command after editing shapes.ts.
+#
+#          Runs BEFORE build_react_native_bundle so Metro picks up the
+#          freshly-written PNGs when it bundles `require()`d assets.
+#
+#          Requires node_modules to be installed (tsx + @napi-rs/canvas
+#          live in devDependencies). If `npm run render-icons` is
+#          missing (e.g. a stale package.json), we fail fast — silently
+#          skipping would ship stale icons. The CI contract is the same
+#          as for lint/tests: run `npm ci` before buildPlugin.sh.
+# Params: $1 project root
+# Returns: exits the whole script on failure
+# =========================================================
+render_shape_icons() {
+    local project_root="$1"
+    write_color_output "Rendering shape icons..." "Blue"
+    (cd "$project_root" && npm run --silent render-icons) \
+        || { write_color_output "Shape icon rendering failed" "Red"; exit 1; }
+    write_color_output "Shape icons rendered" "Green"
+}
+
+# =========================================================
 # Function: build_react_native_bundle
 # Purpose: Generate RN bundle for Android
 # Params: $1 project root; $2 project name; $3 output dir
@@ -758,6 +837,16 @@ main() {
 
     local gen_dir
     gen_dir="$(ensure_build_generated_dir "$project_root")"
+
+    # Guard against node_modules carrying native binaries for a different
+    # host (common when syncing the tree between a Linux sandbox/CI and
+    # the dev's Mac). Runs before any npm/tsx step so render_shape_icons
+    # and the RN bundler never hit an opaque platform-mismatch stacktrace.
+    ensure_node_modules_platform "$project_root"
+
+    # Regenerate the palette's PNG icons from SHAPES before Metro bundles
+    # the assets. See render_shape_icons() header for rationale.
+    render_shape_icons "$project_root"
 
     build_react_native_bundle "$project_root" "$PACKAGE_NAME" "$gen_dir"
 

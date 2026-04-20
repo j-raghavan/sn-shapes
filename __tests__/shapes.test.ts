@@ -20,17 +20,15 @@ import {
 const CENTER: Point = {x: 100, y: 100};
 
 /**
- * Build a shape by id and unwrap the `ShapeBuildResult` to a single
- * Geometry for test-level invariants (point counts, centering, etc.).
- * Composite shapes order the primary silhouette last; callers that need
- * per-primitive access should drive `shape.build` directly.
+ * Build a shape by id with defaults + the default pen style. As of
+ * v1.0.4 every shape builds exactly one Geometry, so this is a thin
+ * convenience wrapper for the per-shape invariants below.
  */
 function buildShape(id: string): Geometry {
   const shape = SHAPES.find(s => s.id === id);
   if (!shape) {throw new Error(`unknown shape id: ${id}`);}
   const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-  const built = shape.build(CENTER, params, PEN_DEFAULTS);
-  return Array.isArray(built) ? built[built.length - 1] : built;
+  return shape.build(CENTER, params, PEN_DEFAULTS);
 }
 
 function expectPenDefaults(geo: Geometry) {
@@ -147,10 +145,11 @@ describe('SHAPES', () => {
   it('Basic category contains the v1.0.3 12-shape set exactly', () => {
     // Carry-over regression guard from v1.0.2 / v1.0.3: the Basic
     // category must still contain precisely the original 12 primitive
-    // shapes. v1.0.4 introduces other categories (Arrows, 3D, Flowchart,
-    // Others) via the `category` field, but this test pins the Basic
-    // set so an accidental re-tagging (e.g. moving rectangle out of
-    // Basic when cross-listing it in Flowchart) is caught immediately.
+    // shapes. v1.0.4 introduces other categories (Arrows, Flowchart,
+    // Decorative, Others) via the `category` field, but this test pins
+    // the Basic set so an accidental re-tagging (e.g. moving rectangle
+    // out of Basic when cross-listing it in Flowchart) is caught
+    // immediately.
     const basicIds = shapesInCategory('basic')
       .map(s => s.id)
       .sort();
@@ -174,44 +173,39 @@ describe('SHAPES', () => {
 
   describe.each(SHAPES.map(s => [s.id, s] as const))('%s', (_, shape) => {
     const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
-    const built = shape.build(CENTER, params, PEN_DEFAULTS);
-    // `ShapeBuildResult` is Geometry | readonly Geometry[]. All current
-    // shapes return a single Geometry; composites (cube, cylinder,
-    // arrow-with-head) land later as arrays. Normalise here so the
-    // existing invariants apply primitive-by-primitive regardless.
-    const primitives: readonly Geometry[] = Array.isArray(built) ? built : [built];
-    const primary = primitives[primitives.length - 1];
+    // v1.0.4: `ShapeBuildResult` is a single Geometry. The multi-
+    // Geometry composite path was removed because the firmware lasso
+    // can only grab one element at a time — so every shape now authors
+    // itself as one closed polygon / circle / ellipse / line.
+    const geo = shape.build(CENTER, params, PEN_DEFAULTS);
 
-    it('build returns at least one Geometry', () => {
-      expect(primitives.length).toBeGreaterThanOrEqual(1);
-      expect(primary).toBeTruthy();
-      expect(typeof primary.type).toBe('string');
+    it('build returns a single Geometry with a recognised type', () => {
+      expect(geo).toBeTruthy();
+      expect(typeof geo.type).toBe('string');
     });
 
-    it('every primitive carries default pen properties', () => {
-      primitives.forEach(p => expectPenDefaults(p));
+    it('carries the default pen properties', () => {
+      expectPenDefaults(geo);
     });
 
-    it('every primitive has a recognised type', () => {
-      primitives.forEach(geo => {
-        switch (geo.type) {
-          case 'GEO_polygon':
-            expect(geo.points.length).toBeGreaterThanOrEqual(3);
-            break;
-          case 'straightLine':
-            expect(geo.points).toHaveLength(2);
-            break;
-          case 'GEO_circle':
-          case 'GEO_ellipse':
-            expect(geo.ellipseCenterPoint).toBeDefined();
-            expect(geo.ellipseMajorAxisRadius).toBeGreaterThan(0);
-            expect(geo.ellipseMinorAxisRadius).toBeGreaterThan(0);
-            expect(geo.ellipseAngle).toBeDefined();
-            break;
-          default:
-            throw new Error(`unknown geometry type ${(geo as Geometry).type}`);
-        }
-      });
+    it('geometry type matches a supported firmware primitive', () => {
+      switch (geo.type) {
+        case 'GEO_polygon':
+          expect(geo.points.length).toBeGreaterThanOrEqual(3);
+          break;
+        case 'straightLine':
+          expect(geo.points).toHaveLength(2);
+          break;
+        case 'GEO_circle':
+        case 'GEO_ellipse':
+          expect(geo.ellipseCenterPoint).toBeDefined();
+          expect(geo.ellipseMajorAxisRadius).toBeGreaterThan(0);
+          expect(geo.ellipseMinorAxisRadius).toBeGreaterThan(0);
+          expect(geo.ellipseAngle).toBeDefined();
+          break;
+        default:
+          throw new Error(`unknown geometry type ${(geo as Geometry).type}`);
+      }
     });
 
     it('declares at least one valid category', () => {
@@ -348,7 +342,7 @@ describe('ShapeCategory model', () => {
   });
 
   it('nextCategory advances forward with wrap-around', () => {
-    // basic → arrows → 3d → flowchart → others → basic
+    // basic → arrows → flowchart → decorative → others → basic
     const forward: ShapeCategory[] = [];
     let c: ShapeCategory = 'basic';
     for (let i = 0; i < CATEGORY_ORDER.length; i++) {

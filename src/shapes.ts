@@ -49,6 +49,7 @@ export type LineGeometry = PenStyle & GeometryFlags & {
 export type Geometry = PolygonGeometry | CircleGeometry | EllipseGeometry | LineGeometry;
 
 export type ShapeId =
+  // Basic primitives (v1.0.3)
   | 'rectangle'
   | 'circle'
   | 'roundedRect'
@@ -60,7 +61,46 @@ export type ShapeId =
   | 'heptagon'
   | 'octagon'
   | 'line'
-  | 'parallelogram';
+  | 'parallelogram'
+  // Arrows (v1.0.4) — every arrow is authored as a single closed
+  // polygon (not "shaft line + triangle tip") so the firmware lasso
+  // grabs the whole arrow as one object after insert, and on-page
+  // re-styling (pen colour / width) applies to the outline uniformly.
+  // Ball / chevron-tail / refresh are the v1.0.4 replacements for the
+  // dropped 3D wireframes — visually richer but still vector-single.
+  | 'blockArrow'
+  | 'doubleArrow'
+  | 'thickArrow'
+  | 'ballArrow'
+  | 'chevronTailArrow'
+  | 'refreshArrow'
+  // Flowchart symbols (v1.0.4). `flowchartTerminator` is the
+  // start/end pill; `flowchartManualInput` is the slanted-top
+  // parallelogram used for keyboard/input steps.
+  | 'flowchartPreparation'
+  | 'flowchartDocument'
+  | 'flowchartTerminator'
+  | 'flowchartManualInput'
+  // Decorative (v1.0.4) — certificate / ribbon / banner / starburst /
+  // awardBadge. All single closed polygons, so styling + rotation behave
+  // like basic primitives. Replaces the earlier 3D-wireframe /
+  // curved-arrow set that had to insert as bitmaps and lost
+  // pen-colour / width control.
+  //
+  // `starburst` is the retail "SALE" sticker — an ellipse with
+  // alternating inner/outer radii. `awardBadge` is a medallion with
+  // two diverging V-notched ribbon tails (twin tails splay outward
+  // rather than cross so the polygon stays simple / non-self-intersecting
+  // — see its build() comment for the boundary walk).
+  | 'certificate'
+  | 'ribbon'
+  | 'banner'
+  | 'starburst'
+  | 'awardBadge'
+  // Others (v1.0.4) — the misc bucket.
+  | 'plus'
+  | 'lightning'
+  | 'trapezoid';
 
 /**
  * Shape groups surfaced in the palette's carousel header. The palette
@@ -73,21 +113,21 @@ export type ShapeId =
  * CATEGORY_LABELS is a Record<ShapeCategory, string> (not Partial) so
  * TypeScript catches missing labels at compile time.
  */
-export type ShapeCategory = 'basic' | 'arrows' | '3d' | 'flowchart' | 'others';
+export type ShapeCategory = 'basic' | 'arrows' | 'flowchart' | 'decorative' | 'others';
 
 export const CATEGORY_ORDER: readonly ShapeCategory[] = [
   'basic',
   'arrows',
-  '3d',
   'flowchart',
+  'decorative',
   'others',
 ];
 
 export const CATEGORY_LABELS: Record<ShapeCategory, string> = {
   basic: 'Basic Shapes',
   arrows: 'Arrows',
-  '3d': '3D Shapes',
   flowchart: 'Flowchart',
+  decorative: 'Decorative',
   others: 'Others',
 };
 
@@ -102,19 +142,23 @@ export type ShapeParameter = {
 };
 
 /**
- * Build output: a single Geometry for primitive shapes (rectangle,
- * circle, …), or a tuple of Geometries for composites (cube, cylinder,
- * arrow-with-head, …). The firmware's `insertGeometry` accepts one
- * Geometry per call, so the palette's insert path loops over the array.
+ * Build output: a single Geometry. Every shape in SHAPES is authored as
+ * one closed polygon / circle / ellipse / line so it lands on-page as a
+ * single lasso-able ink element and the user's PenStyle (colour + width
+ * + pen type) applies to the whole shape uniformly.
  *
- * Composite ordering convention: emit *hidden* or *decorative* primitives
- * first and the *primary silhouette* last. Firmware can only auto-lasso
- * one element after insert (multi-selection is unsupported as of Chauvet
- * 3.27.41), so the caller applies `showLassoAfterInsert = true` to the
- * LAST primitive only. Keeping the main outline last means the user's
- * lasso lands on something they'd actually want to drag.
+ * Multi-primitive composites were removed in v1.0.4 (2026-04-20). The
+ * firmware (Chauvet 3.27.41) has no grouping primitive and supports
+ * only single-element lasso, so inserting N geometries produced N
+ * independently-lassoable ink blobs — a cylinder's four edges would
+ * scatter when the user tried to move it. The interim image-insert
+ * workaround turned those composites into raster stickers, but that
+ * forfeited pen-colour / width and rotation, which was worse than not
+ * offering the shapes at all. Replacement additions (ballArrow,
+ * chevronTailArrow, refreshArrow, certificate, ribbon, banner) are all
+ * single closed polygons.
  */
-export type ShapeBuildResult = Geometry | readonly Geometry[];
+export type ShapeBuildResult = Geometry;
 
 export type Shape = {
   readonly id: ShapeId;
@@ -181,6 +225,41 @@ export function roundedRectPoints(
 
 function makeLine(p1: Point, p2: Point, style: PenStyle): LineGeometry {
   return {...style, type: 'straightLine', points: [p1, p2]};
+}
+
+/**
+ * Sample a point list along a circular arc. Used by arrow shapes that
+ * need to approximate an arc with polygon vertices — the firmware's
+ * Geometry types don't have a native arc primitive, and GEO_polygon
+ * requires a closed vertex list, so rounded silhouettes have to be
+ * expressed as many-sided polygons.
+ *
+ * `segments` is the number of line segments (so the returned list has
+ * `segments + 1` points). Angles are in radians, measured as in
+ * regularPolygon (0 = +x, π/2 = +y in screen coords).
+ *
+ * Start/end angles do not need to be normalised: the helper interpolates
+ * linearly so the caller can request a "long-way-around" sweep by
+ * passing e.g. `startAngle = 0.5, endAngle = 2π - 0.5` — useful for
+ * shapes that trace the majority of a circle's outline (ballArrow,
+ * refreshArrow) and need to go the far side of the disc.
+ */
+function arcPoints(
+  center: Point,
+  radius: number,
+  startAngle: number,
+  endAngle: number,
+  segments: number,
+): Point[] {
+  if (segments < 1) {throw new Error(`arc needs at least 1 segment, got ${segments}`);}
+  return Array.from({length: segments + 1}, (_, i) => {
+    const t = i / segments;
+    const angle = startAngle + (endAngle - startAngle) * t;
+    return {
+      x: center.x + radius * Math.cos(angle),
+      y: center.y + radius * Math.sin(angle),
+    };
+  });
 }
 
 function makePolygon(points: Point[], style: PenStyle): PolygonGeometry {
@@ -438,6 +517,751 @@ export const SHAPES: Shape[] = [
       style
     ),
   })),
+
+  // ---------------------------------------------------------------------------
+  // v1.0.4 — Arrows
+  // ---------------------------------------------------------------------------
+  // 3D wireframes (cube / cylinder / cone / pyramid / sphere / hemisphere
+  // / triangularPrism) and curvedArrow / axes were removed in v1.0.4:
+  // they required multi-geometry composites that can't be lasso'd or
+  // re-styled as a single object. See ShapeBuildResult doc-block above.
+  // Every arrow is one closed polygon so users can lasso + re-style it
+  // as a single object after insert. "Block", "thick" and "double" are
+  // parameter variants of the same hexagonal outline; keeping separate
+  // ShapeIds means the user doesn't have to fiddle with sliders to get
+  // a common preset.
+  {
+    id: 'blockArrow',
+    label: 'Block Arrow',
+    category: 'arrows',
+    parameters: [
+      {id: 'length', label: 'Length (px)', defaultValue: 260, min: 1, unit: 'px'},
+      {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 80, min: 1, unit: 'px'},
+      {id: 'headWidth', label: 'Head Width (px)', defaultValue: 160, min: 1, unit: 'px'},
+      {id: 'headLength', label: 'Head Length (px)', defaultValue: 90, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hl = params.length / 2;
+      const sh = params.shaftWidth / 2;
+      const hh = params.headWidth / 2;
+      const shaftEnd = center.x + hl - params.headLength;
+      return makePolygon(
+        [
+          {x: center.x - hl, y: center.y - sh},
+          {x: shaftEnd, y: center.y - sh},
+          {x: shaftEnd, y: center.y - hh},
+          {x: center.x + hl, y: center.y},
+          {x: shaftEnd, y: center.y + hh},
+          {x: shaftEnd, y: center.y + sh},
+          {x: center.x - hl, y: center.y + sh},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'doubleArrow',
+    label: 'Double Arrow',
+    category: 'arrows',
+    parameters: [
+      {id: 'length', label: 'Length (px)', defaultValue: 300, min: 1, unit: 'px'},
+      {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 70, min: 1, unit: 'px'},
+      {id: 'headWidth', label: 'Head Width (px)', defaultValue: 150, min: 1, unit: 'px'},
+      {id: 'headLength', label: 'Head Length (px)', defaultValue: 70, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hl = params.length / 2;
+      const sh = params.shaftWidth / 2;
+      const hh = params.headWidth / 2;
+      const leftHead = center.x - hl + params.headLength;
+      const rightHead = center.x + hl - params.headLength;
+      return makePolygon(
+        [
+          {x: leftHead, y: center.y - hh},
+          {x: center.x - hl, y: center.y},
+          {x: leftHead, y: center.y + hh},
+          {x: leftHead, y: center.y + sh},
+          {x: rightHead, y: center.y + sh},
+          {x: rightHead, y: center.y + hh},
+          {x: center.x + hl, y: center.y},
+          {x: rightHead, y: center.y - hh},
+          {x: rightHead, y: center.y - sh},
+          {x: leftHead, y: center.y - sh},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'thickArrow',
+    label: 'Thick Arrow',
+    category: 'arrows',
+    parameters: [
+      // Same signature as blockArrow but with a fatter shaft and a
+      // smaller head so the arrow reads as "chunky". Sharing the
+      // parameter schema keeps the palette's stroke-preview logic
+      // simple (no per-arrow special-casing).
+      {id: 'length', label: 'Length (px)', defaultValue: 240, min: 1, unit: 'px'},
+      {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 140, min: 1, unit: 'px'},
+      {id: 'headWidth', label: 'Head Width (px)', defaultValue: 200, min: 1, unit: 'px'},
+      {id: 'headLength', label: 'Head Length (px)', defaultValue: 80, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hl = params.length / 2;
+      const sh = params.shaftWidth / 2;
+      const hh = params.headWidth / 2;
+      const shaftEnd = center.x + hl - params.headLength;
+      return makePolygon(
+        [
+          {x: center.x - hl, y: center.y - sh},
+          {x: shaftEnd, y: center.y - sh},
+          {x: shaftEnd, y: center.y - hh},
+          {x: center.x + hl, y: center.y},
+          {x: shaftEnd, y: center.y + hh},
+          {x: shaftEnd, y: center.y + sh},
+          {x: center.x - hl, y: center.y + sh},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'ballArrow',
+    label: 'Ball Arrow',
+    category: 'arrows',
+    parameters: [
+      {id: 'length', label: 'Length (px)', defaultValue: 280, min: 1, unit: 'px'},
+      {id: 'ballRadius', label: 'Ball (px)', defaultValue: 45, min: 1, unit: 'px'},
+      {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 40, min: 1, unit: 'px'},
+      {id: 'headWidth', label: 'Head Width (px)', defaultValue: 130, min: 1, unit: 'px'},
+      {id: 'headLength', label: 'Head Length (px)', defaultValue: 80, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      // Arrow with a filled-looking disc at the tail. The whole outline
+      // is one closed polygon so pen colour / width and lasso apply to
+      // the entire shape. Geometry is:
+      //   ball ← long arc (≈270°+) → shaft-top → head-top-wing →
+      //   tip → head-bottom-wing → shaft-bottom → ball-back-to-start
+      // The arc deliberately clamps sh ≤ r so the shaft can never be
+      // wider than the ball's diameter (would produce a degenerate
+      // intersection).
+      const hl = params.length / 2;
+      const r = params.ballRadius;
+      const sh = Math.min(params.shaftWidth / 2, r * 0.95);
+      const hh = params.headWidth / 2;
+      const ball = {x: center.x - hl + r, y: center.y};
+      const alpha = Math.asin(sh / r);
+      // Top shaft-to-ball connection is at angle -alpha; bottom is at
+      // +alpha. Sweep the long way round (through -π) so the arc draws
+      // the ~270° visible portion of the ball.
+      const ballArc = arcPoints(ball, r, -alpha, alpha - 2 * Math.PI, 32);
+      const tipX = center.x + hl;
+      const shaftEnd = tipX - params.headLength;
+      return makePolygon(
+        [
+          ...ballArc,
+          {x: shaftEnd, y: center.y + sh},
+          {x: shaftEnd, y: center.y + hh},
+          {x: tipX, y: center.y},
+          {x: shaftEnd, y: center.y - hh},
+          {x: shaftEnd, y: center.y - sh},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'chevronTailArrow',
+    label: 'Chevron Tail Arrow',
+    category: 'arrows',
+    parameters: [
+      {id: 'length', label: 'Length (px)', defaultValue: 280, min: 1, unit: 'px'},
+      {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 80, min: 1, unit: 'px'},
+      {id: 'headWidth', label: 'Head Width (px)', defaultValue: 160, min: 1, unit: 'px'},
+      {id: 'headLength', label: 'Head Length (px)', defaultValue: 90, min: 1, unit: 'px'},
+      {id: 'tailNotch', label: 'Tail Notch (px)', defaultValue: 45, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      // Block arrow whose flat tail has been replaced with a V-notch
+      // cut INTO the body so the tail silhouette reads as a ">". This
+      // makes the tail visually echo the head, clearly communicating
+      // direction without the double-headed-arrow implication of
+      // doubleArrow.
+      const hl = params.length / 2;
+      const sh = params.shaftWidth / 2;
+      const hh = params.headWidth / 2;
+      const shaftEnd = center.x + hl - params.headLength;
+      const notch = Math.min(params.tailNotch, params.length * 0.45);
+      return makePolygon(
+        [
+          {x: center.x - hl, y: center.y - sh},
+          {x: shaftEnd, y: center.y - sh},
+          {x: shaftEnd, y: center.y - hh},
+          {x: center.x + hl, y: center.y},
+          {x: shaftEnd, y: center.y + hh},
+          {x: shaftEnd, y: center.y + sh},
+          {x: center.x - hl, y: center.y + sh},
+          // Tail chevron: indent inward to the middle, then back out.
+          {x: center.x - hl + notch, y: center.y},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'refreshArrow',
+    label: 'Refresh Arrow',
+    category: 'arrows',
+    parameters: [
+      {id: 'radius', label: 'Radius (px)', defaultValue: 110, min: 1, unit: 'px'},
+      {id: 'band', label: 'Band (px)', defaultValue: 42, min: 1, unit: 'px'},
+      {id: 'head', label: 'Head (px)', defaultValue: 55, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      // Circular refresh glyph: an annular band with a gap and one
+      // arrowhead at the gap's trailing end. Authored as a single
+      // closed polygon — outer arc, arrowhead, inner arc back — so
+      // pen style and lasso cover the whole ring including the head.
+      const R = params.radius;
+      const band = Math.min(params.band, R - 1);
+      const r = R - band;
+      const head = params.head;
+      // Small gap above the top of the circle; arrow head lands to the
+      // upper-left, pointing up-right, giving the classic clockwise
+      // "reload" silhouette users already know from browser toolbars.
+      const gap = 0.35;
+      const startAngle = -Math.PI / 2 + gap;
+      const endAngle = startAngle + 2 * Math.PI - 2 * gap;
+      const outerArc = arcPoints(center, R, startAngle, endAngle, 40);
+      const innerArc = arcPoints(center, r, endAngle, startAngle, 40);
+      const midR = (R + r) / 2;
+      const cosE = Math.cos(endAngle);
+      const sinE = Math.sin(endAngle);
+      // Tangent in the direction of increasing θ — the arrow's travel
+      // direction at the end of the arc.
+      const tangent = {x: -sinE, y: cosE};
+      const mid = {x: center.x + midR * cosE, y: center.y + midR * sinE};
+      const outerWing = {
+        x: center.x + (R + head / 2) * cosE,
+        y: center.y + (R + head / 2) * sinE,
+      };
+      const innerWing = {
+        x: center.x + Math.max(1, r - head / 2) * cosE,
+        y: center.y + Math.max(1, r - head / 2) * sinE,
+      };
+      const tip = {
+        x: mid.x + tangent.x * head,
+        y: mid.y + tangent.y * head,
+      };
+      return makePolygon(
+        [...outerArc, outerWing, tip, innerWing, ...innerArc],
+        style,
+      );
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // v1.0.4 — Flowchart
+  // ---------------------------------------------------------------------------
+  {
+    id: 'flowchartPreparation',
+    label: 'Preparation',
+    category: 'flowchart',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 140, min: 1, unit: 'px'},
+      {id: 'tip', label: 'Tip (px)', defaultValue: 40, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      const t = params.tip;
+      return makePolygon(
+        [
+          {x: center.x - hw, y: center.y},
+          {x: center.x - hw + t, y: center.y - hh},
+          {x: center.x + hw - t, y: center.y - hh},
+          {x: center.x + hw, y: center.y},
+          {x: center.x + hw - t, y: center.y + hh},
+          {x: center.x - hw + t, y: center.y + hh},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'flowchartDocument',
+    label: 'Document',
+    category: 'flowchart',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 180, min: 1, unit: 'px'},
+      {id: 'waveDepth', label: 'Wave (px)', defaultValue: 30, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      const d = params.waveDepth;
+      // Bottom edge traces one up-down-up wave; the top and sides are
+      // straight. Two side points on each bottom dip keep the wave
+      // readable even at icon scale.
+      return makePolygon(
+        [
+          {x: center.x - hw, y: center.y - hh},
+          {x: center.x + hw, y: center.y - hh},
+          {x: center.x + hw, y: center.y + hh - d},
+          {x: center.x + hw * 0.5, y: center.y + hh},
+          {x: center.x, y: center.y + hh - d},
+          {x: center.x - hw * 0.5, y: center.y + hh},
+          {x: center.x - hw, y: center.y + hh - d},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'flowchartTerminator',
+    label: 'Terminator',
+    category: 'flowchart',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 120, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      // A stadium is a rounded-rect where the corner radius equals the
+      // short half-dimension. Reusing roundedRectPoints keeps the
+      // smooth-corner sampling consistent with the rounded-rect shape.
+      return makePolygon(
+        roundedRectPoints(center, hw, hh, Math.min(hw, hh)),
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'flowchartManualInput',
+    label: 'Manual Input',
+    category: 'flowchart',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 160, min: 1, unit: 'px'},
+      {id: 'slope', label: 'Slope (px)', defaultValue: 50, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      const s = params.slope;
+      return makePolygon(
+        [
+          {x: center.x - hw, y: center.y - hh + s},
+          {x: center.x + hw, y: center.y - hh},
+          {x: center.x + hw, y: center.y + hh},
+          {x: center.x - hw, y: center.y + hh},
+        ],
+        style,
+      );
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // v1.0.4 — Decorative
+  // ---------------------------------------------------------------------------
+  // Single closed polygons. These replace the dropped 3D / curved-arrow
+  // composites: users still get "rich" shapes to garnish a page, but
+  // each one lasso's and restyles as one ink element.
+  {
+    id: 'certificate',
+    label: 'Certificate',
+    category: 'decorative',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 300, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 200, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      // Five outward-bulging semicircle scallops across the top edge
+      // give the rectangle an award-border silhouette that reads as
+      // "certificate" even at icon scale. Count is fixed because the
+      // palette exposes only px / deg / % parameter units; exposing
+      // scallop count would need a new unit.
+      const SCALLOPS = 5;
+      const segW = params.width / SCALLOPS;
+      const scallopR = segW / 2;
+      const topY = center.y - hh;
+      const points: Point[] = [];
+      for (let i = 0; i < SCALLOPS; i++) {
+        const cx = center.x - hw + segW * i + segW / 2;
+        // Arc π→2π bulges into -y (outward from the top edge). Skip
+        // the first sample on all but the first scallop — each
+        // scallop's start is the previous scallop's end.
+        const arc = arcPoints({x: cx, y: topY}, scallopR, Math.PI, 2 * Math.PI, 10);
+        points.push(...(i === 0 ? arc : arc.slice(1)));
+      }
+      points.push({x: center.x + hw, y: center.y + hh});
+      points.push({x: center.x - hw, y: center.y + hh});
+      return makePolygon(points, style);
+    },
+  },
+
+  {
+    id: 'ribbon',
+    label: 'Ribbon',
+    category: 'decorative',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 320, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 90, min: 1, unit: 'px'},
+      {id: 'notch', label: 'Notch (px)', defaultValue: 35, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      // Clamp notch so the two inward points can't cross the midline
+      // (would flip the polygon inside-out).
+      const n = Math.min(params.notch, hw - 1);
+      // Horizontal hexagon with swallowtail V-notches cut INWARD on
+      // each end — classic "award ribbon" silhouette.
+      return makePolygon(
+        [
+          {x: center.x - hw, y: center.y - hh},
+          {x: center.x + hw, y: center.y - hh},
+          {x: center.x + hw - n, y: center.y},
+          {x: center.x + hw, y: center.y + hh},
+          {x: center.x - hw, y: center.y + hh},
+          {x: center.x - hw + n, y: center.y},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'banner',
+    label: 'Banner',
+    category: 'decorative',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 280, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 100, min: 1, unit: 'px'},
+      {id: 'tail', label: 'Tail (px)', defaultValue: 40, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      const t = params.tail;
+      // Horizontal hexagon with OUTWARD points on each end — mirror
+      // of the ribbon. Reads as a medieval pennant / title banner.
+      return makePolygon(
+        [
+          {x: center.x - hw, y: center.y - hh},
+          {x: center.x + hw, y: center.y - hh},
+          {x: center.x + hw + t, y: center.y},
+          {x: center.x + hw, y: center.y + hh},
+          {x: center.x - hw, y: center.y + hh},
+          {x: center.x - hw - t, y: center.y},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'starburst',
+    label: 'Starburst',
+    category: 'decorative',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 320, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 220, min: 1, unit: 'px'},
+      {id: 'innerRatio', label: 'Spike depth (%)', defaultValue: 72, min: 30, max: 95, unit: '%'},
+    ],
+    build: (center, params, style) => {
+      // Closed polygon whose 2·POINTS vertices alternate between an
+      // outer and inner ellipse — the classic retail "SALE" starburst.
+      // The outer contour is a true ellipse (so width ≠ height gives
+      // the oval-seal variant), and each valley sits on a scaled copy
+      // of that ellipse so the spike depth is consistent along both
+      // axes even when the overall shape is stretched.
+      //
+      // POINTS is an internal constant rather than a parameter because
+      // the palette's parameter units are only px / deg / %, none of
+      // which round-trip cleanly for an integer spike count. Sixteen
+      // spikes reads as a sale sticker at thumbnail size — fewer feels
+      // sparse, more reads as a gear tooth.
+      const POINTS = 16;
+      const outerRx = params.width / 2;
+      const outerRy = params.height / 2;
+      const innerFactor = params.innerRatio / 100;
+      const innerRx = outerRx * innerFactor;
+      const innerRy = outerRy * innerFactor;
+      // Start at -π/2 so the first outer vertex points up — the most
+      // visually settled orientation, matching "SALE" logos that lead
+      // with a top spike.
+      const startAngle = -Math.PI / 2;
+      const step = Math.PI / POINTS; // half a spike-to-spike arc
+      const pts: Point[] = Array.from({length: POINTS * 2}, (_, i) => {
+        const angle = startAngle + step * i;
+        const outer = i % 2 === 0;
+        const rx = outer ? outerRx : innerRx;
+        const ry = outer ? outerRy : innerRy;
+        return {
+          x: center.x + rx * Math.cos(angle),
+          y: center.y + ry * Math.sin(angle),
+        };
+      });
+      return makePolygon(pts, style);
+    },
+  },
+
+  {
+    id: 'awardBadge',
+    label: 'Award Badge',
+    category: 'decorative',
+    parameters: [
+      {id: 'radius', label: 'Medallion (px)', defaultValue: 90, min: 10, unit: 'px'},
+      {id: 'tailLength', label: 'Tail (px)', defaultValue: 140, min: 0, unit: 'px'},
+      {id: 'tailSpanDeg', label: 'Tail span (deg)', defaultValue: 30, min: 5, max: 60, unit: 'deg'},
+      {id: 'tailSpreadDeg', label: 'Splay (deg)', defaultValue: 20, min: 0, max: 45, unit: 'deg'},
+      {id: 'notchDepth', label: 'V-notch (px)', defaultValue: 30, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      // A single non-self-intersecting closed polygon that reads as
+      // "medallion + twin ribbon tails". The tails diverge outward
+      // rather than cross: a self-intersecting X below the medallion
+      // looks closer to a real award rosette but breaks the
+      // single-simple-polygon invariant every other v1.0.4 shape holds
+      // to, which keeps the firmware lasso / pen-style path predictable.
+      //
+      // Boundary order (clockwise visually, Y-down screen coords —
+      // θ increasing = CW visually here):
+      //   1. Long top arc: top of circle → past right → right-tail
+      //      outer attachment (≈ 5/6 of the circle).
+      //   2. Right tail: outer-bottom corner → V-notch → inner-bottom.
+      //   3. Short bottom arc: right-tail inner attachment →
+      //      left-tail inner attachment (tiny sweep across bottom).
+      //   4. Left tail: mirror of right.
+      //   5. Long top arc: left-tail outer attachment → top of circle.
+      const R = params.radius;
+      const tailLen = params.tailLength;
+      const spanRad = (params.tailSpanDeg * Math.PI) / 180;
+      const spreadRad = (params.tailSpreadDeg * Math.PI) / 180;
+      const notch = params.notchDepth;
+      // Small fixed angular gap between the two inner attachments so
+      // the tails don't share a single point on the circle — a shared
+      // point would collapse arc2 to zero length and put a degenerate
+      // joint at the polygon's seam.
+      const GAP_RAD = Math.PI / 18; // 10°
+
+      // Angles measured CCW from +X axis; in Y-down screen coords
+      // θ = π/2 is the bottom of the circle and θ = 3π/2 is the top.
+      const rightInnerTheta = Math.PI / 2 - GAP_RAD / 2;
+      const rightOuterTheta = rightInnerTheta - spanRad;
+      const leftInnerTheta = Math.PI / 2 + GAP_RAD / 2;
+      const leftOuterTheta = leftInnerTheta + spanRad;
+
+      const circlePt = (theta: number): Point => ({
+        x: center.x + R * Math.cos(theta),
+        y: center.y + R * Math.sin(theta),
+      });
+
+      // Tail axis = "straight down", rotated by `spread` toward the
+      // outside. Rotating (0, 1) CW-visually (which is CCW in the math
+      // sense used by 2D rotation matrices under Y-down) gives
+      // (sin φ, cos φ). The right tail uses +sin φ (splays right),
+      // the left tail negates it.
+      const rightAxisX = Math.sin(spreadRad);
+      const rightAxisY = Math.cos(spreadRad);
+      const leftAxisX = -rightAxisX;
+      const leftAxisY = rightAxisY;
+
+      const rightOuterTop = circlePt(rightOuterTheta);
+      const rightInnerTop = circlePt(rightInnerTheta);
+      const leftInnerTop = circlePt(leftInnerTheta);
+      const leftOuterTop = circlePt(leftOuterTheta);
+
+      const rightOuterBottom: Point = {
+        x: rightOuterTop.x + rightAxisX * tailLen,
+        y: rightOuterTop.y + rightAxisY * tailLen,
+      };
+      const rightInnerBottom: Point = {
+        x: rightInnerTop.x + rightAxisX * tailLen,
+        y: rightInnerTop.y + rightAxisY * tailLen,
+      };
+      // Notch = midpoint of the tail's bottom edge pulled inward
+      // (toward the medallion) by `notch`. Inward = -tail axis.
+      const rightNotch: Point = {
+        x: (rightOuterBottom.x + rightInnerBottom.x) / 2 - rightAxisX * notch,
+        y: (rightOuterBottom.y + rightInnerBottom.y) / 2 - rightAxisY * notch,
+      };
+
+      const leftOuterBottom: Point = {
+        x: leftOuterTop.x + leftAxisX * tailLen,
+        y: leftOuterTop.y + leftAxisY * tailLen,
+      };
+      const leftInnerBottom: Point = {
+        x: leftInnerTop.x + leftAxisX * tailLen,
+        y: leftInnerTop.y + leftAxisY * tailLen,
+      };
+      const leftNotch: Point = {
+        x: (leftOuterBottom.x + leftInnerBottom.x) / 2 - leftAxisX * notch,
+        y: (leftOuterBottom.y + leftInnerBottom.y) / 2 - leftAxisY * notch,
+      };
+
+      // 40 segments for each long top arc + 4 for the short bottom
+      // arc = 84 segments of arc, well below the firmware's practical
+      // polygon-complexity limit. Matches the smoothness level of
+      // certificate (5 × 10-segment scallops = 50 segments).
+      const TOP_ARC_SEGMENTS = 40;
+      const BOTTOM_ARC_SEGMENTS = 4;
+
+      // arc1: top (θ = 3π/2) → past right → rightOuterTop. End angle is
+      // `rightOuterTheta + 2π` so the sweep moves forward (θ increasing)
+      // through the 2π = 0 seam without backtracking.
+      const arc1 = arcPoints(
+        center,
+        R,
+        (3 * Math.PI) / 2,
+        rightOuterTheta + 2 * Math.PI,
+        TOP_ARC_SEGMENTS,
+      );
+      // arc2: rightInnerTop → leftInnerTop across the bottom of the
+      // circle — tiny sweep of GAP_RAD radians.
+      const arc2 = arcPoints(
+        center,
+        R,
+        rightInnerTheta,
+        leftInnerTheta,
+        BOTTOM_ARC_SEGMENTS,
+      );
+      // arc3: leftOuterTop → top of circle (θ = 3π/2).
+      const arc3 = arcPoints(
+        center,
+        R,
+        leftOuterTheta,
+        (3 * Math.PI) / 2,
+        TOP_ARC_SEGMENTS,
+      );
+
+      // Each arcPoints call returns [start … end] inclusive. The seams
+      // between arcs and tail vertices already share endpoints so we
+      // concatenate directly — no slicing. makePolygon closes the
+      // polygon by duplicating the first vertex; arc3's final point
+      // coincides with arc1's first point, so the closing segment is
+      // zero-length and harmless.
+      const points: Point[] = [
+        ...arc1,
+        rightOuterBottom,
+        rightNotch,
+        rightInnerBottom,
+        ...arc2,
+        leftInnerBottom,
+        leftNotch,
+        leftOuterBottom,
+        ...arc3,
+      ];
+      return makePolygon(points, style);
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // v1.0.4 — Others
+  // ---------------------------------------------------------------------------
+  {
+    id: 'plus',
+    label: 'Plus',
+    category: 'others',
+    parameters: [
+      {id: 'size', label: 'Size (px)', defaultValue: 200, min: 1, unit: 'px'},
+      {id: 'thickness', label: 'Arm (px)', defaultValue: 60, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hs = params.size / 2;
+      const ht = params.thickness / 2;
+      // Trace the + outline clockwise starting from top-left of the
+      // top arm. Twelve vertices — the minimum for a symmetric plus.
+      return makePolygon(
+        [
+          {x: center.x - ht, y: center.y - hs},
+          {x: center.x + ht, y: center.y - hs},
+          {x: center.x + ht, y: center.y - ht},
+          {x: center.x + hs, y: center.y - ht},
+          {x: center.x + hs, y: center.y + ht},
+          {x: center.x + ht, y: center.y + ht},
+          {x: center.x + ht, y: center.y + hs},
+          {x: center.x - ht, y: center.y + hs},
+          {x: center.x - ht, y: center.y + ht},
+          {x: center.x - hs, y: center.y + ht},
+          {x: center.x - hs, y: center.y - ht},
+          {x: center.x - ht, y: center.y - ht},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'lightning',
+    label: 'Lightning',
+    category: 'others',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 140, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 260, min: 1, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      // Six-vertex bolt: two jagged inner kinks create the classic
+      // "flash" silhouette. Coordinates are in fractions of the half-
+      // extents so the bolt scales naturally with width/height.
+      return makePolygon(
+        [
+          {x: center.x - hw * 0.3, y: center.y - hh},
+          {x: center.x + hw * 0.7, y: center.y - hh * 0.1},
+          {x: center.x + hw * 0.1, y: center.y - hh * 0.1},
+          {x: center.x + hw * 0.3, y: center.y + hh},
+          {x: center.x - hw * 0.7, y: center.y + hh * 0.1},
+          {x: center.x - hw * 0.1, y: center.y + hh * 0.1},
+        ],
+        style,
+      );
+    },
+  },
+
+  {
+    id: 'trapezoid',
+    label: 'Trapezoid',
+    // Belongs in the 'others' bucket (not 'basic') so the existing
+    // v1.0.3-Basic-shape-set regression test in __tests__/shapes.test.ts
+    // doesn't need a pin-bump. Users still find it quickly — "Others"
+    // is the most-scrolled-to bucket for misc primitives.
+    category: 'others',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 160, min: 1, unit: 'px'},
+      {id: 'topOffset', label: 'Top Inset (px)', defaultValue: 50, min: 0, unit: 'px'},
+    ],
+    build: (center, params, style) => {
+      const hw = params.width / 2;
+      const hh = params.height / 2;
+      const o = params.topOffset;
+      return makePolygon(
+        [
+          {x: center.x - hw + o, y: center.y - hh},
+          {x: center.x + hw - o, y: center.y - hh},
+          {x: center.x + hw, y: center.y + hh},
+          {x: center.x - hw, y: center.y + hh},
+        ],
+        style,
+      );
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -484,3 +1308,4 @@ export function nextCategory(
   const n = CATEGORY_ORDER.length;
   return CATEGORY_ORDER[(idx + direction + n) % n];
 }
+
