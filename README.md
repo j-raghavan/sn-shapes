@@ -11,18 +11,29 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 
 ## Demo
 
-<video src="https://github.com/user-attachments/assets/298211f3-0039-4edd-aee5-6f1259272cc2" controls muted playsinline width="720"></video>
+### v1.4.0
+<video src="https://github.com/user-attachments/assets/af76ff12-1867-4b54-aec2-8d8e13845731" controls muted playsinline widh="720"></video
 
-## What's New in v1.0.3
+<!--
+<video src="https://github.com/user-attachments/assets/298211f3-0039-4edd-aee5-6f1259272cc2" controls muted playsinline width="720"></video>
+-->
+
+## What's New in v1.0.4
 
 - **One popup, one tap to insert**: pick a shape, tweak the colour and stroke width, then tap outside to drop it on the page. No extra Insert button needed.
 - **Live preview**: see exactly what your shape will look like, colour and thickness, before it lands on the page.
 - **Auto-select after insert**: the shape you just placed is already lassoed, so you can drag, resize, or move it without an extra tap.
 - **Smaller, less intrusive popup**: the panel takes up roughly 40% less of your page so you can keep drawing around it.
+- **Added** ~19 new pure-vector shapes:
+    - **Arrows**: ball arrow, chevron-tail arrow, refresh/loop arrow, thick arrow, double arrow, block arrow
+    - **Basic**: rectangle, trapezoid, plus, lightning bolt   
+    - **Flowchart**: document, manual input, preparation, terminator
+    - **Decorative**: certificate, ribbon, banner, starburst (SALE-sticker spiked oval), award badge (medallion with V-notched tails)
+- Popup is ~20% larger — the old one felt cramped on the A5 display.
+- Popup size is now fixed. It no longer jumps/resizes when you flip between Basic / Arrows / Flowchart / Decorative / Others.
+- Carousel category arrows redesigned — dropped the off-center circle, the triangle glyph is now the whole affordance and sits properly centered.
+- Leaner .snplg bundle — no more bundled raster assets.
 
-## Available Shapes
-
-Rectangle, Circle, Rounded Rectangle, Ellipse, Triangle, Diamond, Pentagon, Hexagon, Heptagon, Octagon, Line, and Parallelogram.
 
 ## How to Use
 
