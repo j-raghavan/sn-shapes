@@ -5,7 +5,7 @@
 ![Lint](https://img.shields.io/badge/lint-passing-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Supernote-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Version](https://img.shields.io/badge/version-1.0.3-blue)
+![Version](https://img.shields.io/badge/version-1.0.5-blue)
 
 A toolbar plugin for Supernote that lets you insert geometric shapes directly into your notes.
 
