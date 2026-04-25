@@ -113,9 +113,22 @@ export type ShapeId =
  * CATEGORY_LABELS is a Record<ShapeCategory, string> (not Partial) so
  * TypeScript catches missing labels at compile time.
  */
-export type ShapeCategory = 'basic' | 'arrows' | 'flowchart' | 'decorative' | 'others';
+export type ShapeCategory =
+  // 'favorites' is a user-curated, dynamically-populated bucket — no
+  // shape declares `category: 'favorites'`. Membership comes from the
+  // user's persisted favorites list (see favoritesStorage.ts) and is
+  // resolved at render time via favoriteShapes(). Listed first in
+  // CATEGORY_ORDER so one ◀ tap from the landing 'basic' group reaches
+  // it without scrolling forward through every other category.
+  | 'favorites'
+  | 'basic'
+  | 'arrows'
+  | 'flowchart'
+  | 'decorative'
+  | 'others';
 
 export const CATEGORY_ORDER: readonly ShapeCategory[] = [
+  'favorites',
   'basic',
   'arrows',
   'flowchart',
@@ -124,6 +137,7 @@ export const CATEGORY_ORDER: readonly ShapeCategory[] = [
 ];
 
 export const CATEGORY_LABELS: Record<ShapeCategory, string> = {
+  favorites: '♡ Favorites',
   basic: 'Basic Shapes',
   arrows: 'Arrows',
   flowchart: 'Flowchart',
@@ -1374,9 +1388,105 @@ export function shapeCategories(shape: Shape): readonly ShapeCategory[] {
  * Used by the palette to render the filtered grid for the current
  * carousel group. Returns a fresh array so callers can safely sort /
  * slice without mutating SHAPES.
+ *
+ * NOTE: 'favorites' is a user-curated bucket whose membership is not
+ * declared on `Shape.category` — pass the user's favorites list to
+ * `favoriteShapes()` instead. Calling this with 'favorites' returns
+ * an empty array (no shape declares that category statically).
  */
 export function shapesInCategory(category: ShapeCategory): Shape[] {
   return SHAPES.filter(s => shapeCategories(s).includes(category));
+}
+
+/**
+ * Resolve the user's favorites list to actual Shape objects, preserving
+ * the user's insertion order (most recently favorited first). Unknown
+ * IDs — e.g. left over from a removed shape in a future release — are
+ * silently dropped so the palette never tries to render a missing icon.
+ *
+ * Kept in shapes.ts (not the storage module) because it's a pure
+ * domain operation over the shape catalogue; the storage module owns
+ * persistence only.
+ */
+export function favoriteShapes(favorites: readonly ShapeId[]): Shape[] {
+  // O(F) over favorites with O(1) catalogue lookup — fine at the spec's
+  // 30-favorite cap and well below the 30 × SHAPES.length naive scan.
+  const byId = new Map<ShapeId, Shape>(SHAPES.map(s => [s.id, s]));
+  return favorites
+    .map(id => byId.get(id))
+    .filter((s): s is Shape => s !== undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Favorites — pure helpers
+// ---------------------------------------------------------------------------
+// Live in shapes.ts (not favoritesStorage.ts) because they operate on
+// ShapeIds and contain no persistence concerns — keeping the storage
+// adapter focused purely on serialisation / I/O (single responsibility).
+
+/** Maximum favorites a user may pin. Mirrored in favoritesStorage. */
+export const MAX_FAVORITES = 30;
+
+/** True iff `shapeId` is in the favorites list. */
+export function isFavorite(
+  shapeId: ShapeId,
+  favorites: readonly ShapeId[],
+): boolean {
+  return favorites.includes(shapeId);
+}
+
+/**
+ * Add a shape to favorites, preserving uniqueness and "most recent
+ * first" ordering. Returns a new array (never mutates input) so callers
+ * can use the result as a React state value safely. Idempotent: adding
+ * an already-favorited shape returns the input unchanged. Hard-caps at
+ * MAX_FAVORITES — over-cap adds return the input unchanged (caller is
+ * expected to surface an error to the user).
+ */
+export function addFavorite(
+  shapeId: ShapeId,
+  favorites: readonly ShapeId[],
+): readonly ShapeId[] {
+  if (favorites.includes(shapeId)) {return favorites;}
+  if (favorites.length >= MAX_FAVORITES) {return favorites;}
+  return [shapeId, ...favorites];
+}
+
+/**
+ * Remove a shape from favorites. Returns a new array; does not mutate
+ * input. Idempotent: removing a non-favorite returns the input unchanged.
+ */
+export function removeFavorite(
+  shapeId: ShapeId,
+  favorites: readonly ShapeId[],
+): readonly ShapeId[] {
+  if (!favorites.includes(shapeId)) {return favorites;}
+  return favorites.filter(id => id !== shapeId);
+}
+
+/**
+ * Toggle a shape's favorite state. Returns the new favorites array and
+ * a status flag — 'added' / 'removed' / 'capped' (over MAX_FAVORITES)
+ * — so the caller can surface an error banner without reimplementing
+ * the cap check. Single funnel for the heart-toggle handler in the
+ * palette, which keeps the UI free of favorites bookkeeping logic.
+ */
+export type ToggleFavoriteResult = {
+  favorites: readonly ShapeId[];
+  status: 'added' | 'removed' | 'capped';
+};
+
+export function toggleFavorite(
+  shapeId: ShapeId,
+  favorites: readonly ShapeId[],
+): ToggleFavoriteResult {
+  if (favorites.includes(shapeId)) {
+    return {favorites: removeFavorite(shapeId, favorites), status: 'removed'};
+  }
+  if (favorites.length >= MAX_FAVORITES) {
+    return {favorites, status: 'capped'};
+  }
+  return {favorites: addFavorite(shapeId, favorites), status: 'added'};
 }
 
 /**

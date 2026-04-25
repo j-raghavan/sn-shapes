@@ -12,8 +12,15 @@ import {
   CATEGORY_ORDER,
   CATEGORY_LABELS,
   ShapeCategory,
+  ShapeId,
   shapeCategories,
   shapesInCategory,
+  favoriteShapes,
+  isFavorite,
+  addFavorite,
+  removeFavorite,
+  toggleFavorite,
+  MAX_FAVORITES,
   nextCategory,
 } from '../src/shapes';
 
@@ -349,29 +356,138 @@ describe('ShapeCategory model', () => {
   });
 
   it('nextCategory advances forward with wrap-around', () => {
-    // basic → arrows → flowchart → decorative → others → basic
-    const forward: ShapeCategory[] = [];
-    let c: ShapeCategory = 'basic';
+    // Walks the full cycle (favorites → basic → … → others → favorites)
+    // and asserts we land back where we started after N steps.
+    const start: ShapeCategory = CATEGORY_ORDER[0];
+    let c: ShapeCategory = start;
     for (let i = 0; i < CATEGORY_ORDER.length; i++) {
       c = nextCategory(c, 1);
-      forward.push(c);
     }
-    // After N steps forward we're back at the start.
-    expect(forward[forward.length - 1]).toBe('basic');
+    expect(c).toBe(start);
   });
 
   it('nextCategory reverses with wrap-around', () => {
-    // basic -1 → others (last element)
-    expect(nextCategory('basic', -1)).toBe(
-      CATEGORY_ORDER[CATEGORY_ORDER.length - 1],
-    );
-    // others +1 → basic (wraps)
-    expect(nextCategory(CATEGORY_ORDER[CATEGORY_ORDER.length - 1], 1)).toBe(
-      'basic',
-    );
+    const first = CATEGORY_ORDER[0];
+    const last = CATEGORY_ORDER[CATEGORY_ORDER.length - 1];
+    expect(nextCategory(first, -1)).toBe(last);
+    expect(nextCategory(last, 1)).toBe(first);
   });
 
   it('nextCategory throws on an unknown category', () => {
     expect(() => nextCategory('bogus' as ShapeCategory, 1)).toThrow();
+  });
+
+  it('CATEGORY_ORDER lists favorites first', () => {
+    // Pin position so future reorders don't silently shuffle the
+    // dynamically-populated bucket into the middle of the static set,
+    // which would change the "one ◀ tap from basic" landing rule.
+    expect(CATEGORY_ORDER[0]).toBe('favorites');
+  });
+
+  it('shapesInCategory("favorites") returns an empty static slice', () => {
+    // Favorites membership is dynamic; no shape declares the category
+    // statically. Callers must use favoriteShapes(list) to resolve the
+    // user's pinned shapes.
+    expect(shapesInCategory('favorites')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Favorites — pure helpers (v1.0.5)
+// ---------------------------------------------------------------------------
+
+describe('favorites helpers', () => {
+  const RECT: ShapeId = 'rectangle';
+  const CIRCLE: ShapeId = 'circle';
+  const TRI: ShapeId = 'triangle';
+
+  describe('isFavorite', () => {
+    it('is true when the id is present', () => {
+      expect(isFavorite(RECT, [CIRCLE, RECT])).toBe(true);
+    });
+    it('is false when the id is absent', () => {
+      expect(isFavorite(RECT, [CIRCLE])).toBe(false);
+    });
+    it('is false on an empty list', () => {
+      expect(isFavorite(RECT, [])).toBe(false);
+    });
+  });
+
+  describe('addFavorite', () => {
+    it('prepends to favor "most recent first"', () => {
+      expect(addFavorite(TRI, [RECT, CIRCLE])).toEqual([TRI, RECT, CIRCLE]);
+    });
+    it('is idempotent for an already-favorited id', () => {
+      const fav = [RECT, CIRCLE];
+      expect(addFavorite(RECT, fav)).toBe(fav);
+    });
+    it('does not mutate the input array', () => {
+      const fav: readonly ShapeId[] = [RECT];
+      const result = addFavorite(CIRCLE, fav);
+      expect(fav).toEqual([RECT]);
+      expect(result).not.toBe(fav);
+    });
+    it('returns the input unchanged when the cap is reached', () => {
+      const capped: readonly ShapeId[] = Array.from(
+        {length: MAX_FAVORITES},
+        (_, i) => `id_${i}` as ShapeId,
+      );
+      expect(addFavorite(RECT, capped)).toBe(capped);
+    });
+  });
+
+  describe('removeFavorite', () => {
+    it('drops the matching id', () => {
+      expect(removeFavorite(RECT, [CIRCLE, RECT, TRI])).toEqual([CIRCLE, TRI]);
+    });
+    it('is idempotent for a non-member', () => {
+      const fav = [CIRCLE];
+      expect(removeFavorite(RECT, fav)).toBe(fav);
+    });
+    it('does not mutate the input array', () => {
+      const fav: readonly ShapeId[] = [RECT, CIRCLE];
+      const result = removeFavorite(RECT, fav);
+      expect(fav).toEqual([RECT, CIRCLE]);
+      expect(result).not.toBe(fav);
+    });
+  });
+
+  describe('toggleFavorite', () => {
+    it('returns "added" when the shape is new', () => {
+      const r = toggleFavorite(RECT, [CIRCLE]);
+      expect(r.status).toBe('added');
+      expect(r.favorites).toEqual([RECT, CIRCLE]);
+    });
+    it('returns "removed" when the shape is already favorited', () => {
+      const r = toggleFavorite(RECT, [RECT, CIRCLE]);
+      expect(r.status).toBe('removed');
+      expect(r.favorites).toEqual([CIRCLE]);
+    });
+    it('returns "capped" with the input unchanged at the limit', () => {
+      const capped: readonly ShapeId[] = Array.from(
+        {length: MAX_FAVORITES},
+        (_, i) => `id_${i}` as ShapeId,
+      );
+      const r = toggleFavorite(RECT, capped);
+      expect(r.status).toBe('capped');
+      expect(r.favorites).toBe(capped);
+    });
+  });
+
+  describe('favoriteShapes', () => {
+    it('preserves the user-supplied order (most recent first)', () => {
+      const result = favoriteShapes([CIRCLE, RECT]);
+      expect(result.map(s => s.id)).toEqual([CIRCLE, RECT]);
+    });
+    it('drops unknown ids without throwing', () => {
+      const result = favoriteShapes([
+        'not_a_real_shape' as ShapeId,
+        RECT,
+      ]);
+      expect(result.map(s => s.id)).toEqual([RECT]);
+    });
+    it('returns an empty array for an empty list', () => {
+      expect(favoriteShapes([])).toEqual([]);
+    });
   });
 });

@@ -34,6 +34,10 @@ import {
   WIDTH_PRESETS,
   COLOR_PRESETS,
 } from '../src/shapes';
+import {
+  FavoritesStorage,
+  createMemoryFavoritesStorage,
+} from '../src/favoritesStorage';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
 import {
   PluginCommAPI,
@@ -83,10 +87,15 @@ afterEach(() => {
 });
 
 // Helper: render the palette and let mount-time async work settle.
-async function mountPalette() {
+// Accepts an optional pre-seeded favorites storage so individual tests
+// can land in "user already has favorites X, Y" without driving the
+// heart toggle through the UI first. When omitted, every mount uses a
+// fresh memory backend so favorites state never leaks between tests.
+async function mountPalette(storage?: FavoritesStorage) {
+  const injectedStorage = storage ?? createMemoryFavoritesStorage();
   let tree: ReactTestRenderer;
   act(() => {
-    tree = create(<ShapePalette />);
+    tree = create(<ShapePalette storage={injectedStorage} />);
   });
   await act(async () => {
     await flushPromises();
@@ -380,15 +389,20 @@ describe('ShapePalette (merged popup)', () => {
     // multi-geometry composite would show up here as the insert count
     // going below SHAPES.length (commits silently dropped) or as an
     // extra reference to a bitmap-API mock that no longer exists.
+    //
+    // 'favorites' is excluded from the walk: its membership is
+    // user-driven (no static representative) and the insert path is
+    // identical to whichever shape happens to be favorited.
+    const staticCategories = CATEGORY_ORDER.filter(c => c !== 'favorites');
     const tree = await mountPalette();
-    // Sample one shape from every category (covers arrows / flowchart
-    // / decorative / others without looping through all 24).
-    const representatives: ShapeId[] = CATEGORY_ORDER.map(c =>
+    const representatives: ShapeId[] = staticCategories.map(c =>
       shapesInCategory(c)[0].id,
     );
+    // Carousel landing is 'basic' (index 1 of CATEGORY_ORDER); the
+    // representatives list is in CATEGORY_ORDER minus favorites, so
+    // staticCategories[0] === 'basic' and we don't need to walk for it.
     for (let i = 0; i < representatives.length; i++) {
       const id = representatives[i];
-      // Walk the carousel to this shape's category, then select + commit.
       for (let j = 0; j < i; j++) {
         await act(async () => {
           findByTestID(tree, TEST_IDS.groupNext).props.onPress();
@@ -397,9 +411,6 @@ describe('ShapePalette (merged popup)', () => {
       }
       await selectShape(tree, id);
       await pressInsert(tree);
-      // Reset to basic for the next iteration (pressInsert closes the
-      // popup on success via mocked closePluginView; selection still
-      // lives in component state). Walk back by cycling prev.
       for (let j = 0; j < i; j++) {
         await act(async () => {
           findByTestID(tree, TEST_IDS.groupPrev).props.onPress();
@@ -571,12 +582,17 @@ describe('ShapePalette (merged popup)', () => {
     );
   });
 
-  it('prev arrow from the landing group wraps to the last group', async () => {
+  it('prev arrow from the landing group steps to the previous category', async () => {
+    // Landing category is 'basic'; walking ◀ once must land on the
+    // category that immediately precedes it in CATEGORY_ORDER. The
+    // exact value depends on CATEGORY_ORDER (currently 'favorites'),
+    // so the test derives it via nextCategory rather than hard-coding
+    // — keeps the test resilient to future reorders.
     const tree = await mountPalette();
     await tapGroupPrev(tree);
-    const last = CATEGORY_ORDER[CATEGORY_ORDER.length - 1];
+    const prev = nextCategory('basic', -1);
     expect(findByTestID(tree, TEST_IDS.groupLabel).props.children).toBe(
-      CATEGORY_LABELS[last],
+      CATEGORY_LABELS[prev],
     );
   });
 
@@ -615,6 +631,218 @@ describe('ShapePalette (merged popup)', () => {
       if (resolveInsert) {resolveInsert();}
       await flushPromises();
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Favorites (v1.0.5)
+  // -------------------------------------------------------------------------
+  // The heart toggle lives in the preview column (single hit-target,
+  // larger affordance than per-cell stars). Persistence is exercised
+  // via the injected memory backend so each test is deterministic.
+  async function tapFavorite(tree: ReactTestRenderer) {
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.favoriteToggle).props.onPress();
+      await flushPromises();
+    });
+  }
+
+  // Walk the carousel until the requested category is active. Used by
+  // the favorites tests to inspect the favorites grid without having
+  // to know the prev/next direction by hand.
+  async function navigateToCategory(
+    tree: ReactTestRenderer,
+    target: ShapeCategory,
+  ) {
+    // CATEGORY_ORDER + landing 'basic' make any target reachable via
+    // ◀-only navigation in at most CATEGORY_ORDER.length steps.
+    for (let i = 0; i < CATEGORY_ORDER.length; i++) {
+      if (
+        findByTestID(tree, TEST_IDS.groupLabel).props.children ===
+        CATEGORY_LABELS[target]
+      ) {
+        return;
+      }
+      await act(async () => {
+        findByTestID(tree, TEST_IDS.groupPrev).props.onPress();
+        await flushPromises();
+      });
+    }
+    throw new Error(`navigateToCategory: ${target} not reached`);
+  }
+
+  it('renders the heart toggle inside the preview column', async () => {
+    const tree = await mountPalette();
+    expect(findByTestID(tree, TEST_IDS.favoriteToggle)).toBeTruthy();
+    const previewCol = findByTestID(tree, TEST_IDS.previewColumn);
+    expect(
+      previewCol.findAllByProps({testID: TEST_IDS.favoriteToggle}).length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows ♡ for an unfavorited shape and ❤ once toggled', async () => {
+    const tree = await mountPalette();
+    // The Text child of the Pressable carries the icon glyph; walk
+    // children rather than relying on the Pressable's own `children`
+    // (which is the React element tree, not a string).
+    const readGlyph = () =>
+      findByTestID(tree, TEST_IDS.favoriteToggle).findByType('Text' as never)
+        .props.children;
+    expect(readGlyph()).toBe('♡');
+    await tapFavorite(tree);
+    expect(readGlyph()).toBe('❤');
+  });
+
+  it('Favorites category shows the empty placeholder when no shapes are favorited', async () => {
+    const tree = await mountPalette();
+    await navigateToCategory(tree, 'favorites');
+    expect(findByTestID(tree, TEST_IDS.favoritesEmpty)).toBeTruthy();
+  });
+
+  it('toggling the heart adds the selected shape to the Favorites grid', async () => {
+    const tree = await mountPalette();
+    // Default selection is rectangle. Heart it, then walk to favorites.
+    await tapFavorite(tree);
+    await navigateToCategory(tree, 'favorites');
+    expect(() => findByTestID(tree, TEST_IDS.cell('rectangle'))).not.toThrow();
+    expect(() => findByTestID(tree, TEST_IDS.favoritesEmpty)).toThrow();
+  });
+
+  it('hydrates favorites from injected storage on mount', async () => {
+    const seeded = createMemoryFavoritesStorage(['circle', 'pentagon']);
+    const tree = await mountPalette(seeded);
+    await navigateToCategory(tree, 'favorites');
+    expect(() => findByTestID(tree, TEST_IDS.cell('circle'))).not.toThrow();
+    expect(() => findByTestID(tree, TEST_IDS.cell('pentagon'))).not.toThrow();
+  });
+
+  it('persists changes through the storage backend', async () => {
+    const seeded = createMemoryFavoritesStorage();
+    const tree = await mountPalette(seeded);
+    await selectShape(tree, 'pentagon');
+    await tapFavorite(tree);
+    // Drain microtasks so the save effect resolves.
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(await seeded.load()).toEqual(['pentagon']);
+  });
+
+  it('hearting twice removes the shape (idempotent toggle)', async () => {
+    const tree = await mountPalette();
+    await selectShape(tree, 'circle');
+    await tapFavorite(tree);
+    await tapFavorite(tree);
+    await navigateToCategory(tree, 'favorites');
+    expect(findByTestID(tree, TEST_IDS.favoritesEmpty)).toBeTruthy();
+  });
+
+  it('Favorites grid preserves "most recent first" ordering', async () => {
+    // Heart rectangle, then pentagon, then triangle. Favorites grid
+    // must show triangle, pentagon, rectangle — matching the
+    // addFavorite contract pinned in shapes.test.ts. Asserts the
+    // RENDER ORDER of cells inside the grid scroll view, not just
+    // their existence — a reversed-order regression has to fail here.
+    const tree = await mountPalette();
+    await selectShape(tree, 'rectangle');
+    await tapFavorite(tree);
+    await selectShape(tree, 'pentagon');
+    await tapFavorite(tree);
+    await selectShape(tree, 'triangle');
+    await tapFavorite(tree);
+    await navigateToCategory(tree, 'favorites');
+    const shapesCol = findByTestID(tree, TEST_IDS.shapesColumn);
+    // findAll returns one match per node in the rendered tree — for a
+    // single Pressable cell that includes the composite element, the
+    // host primitive, and any wrappers. Dedupe by testID so we get one
+    // entry per cell, in render order.
+    const seen = new Set<string>();
+    const renderedFavorites: string[] = [];
+    for (const node of shapesCol.findAll(
+      n =>
+        typeof n.props?.testID === 'string' &&
+        n.props.testID.startsWith('shape-cell-'),
+    )) {
+      const id = (node.props.testID as string).replace('shape-cell-', '');
+      if (!seen.has(id)) {
+        seen.add(id);
+        renderedFavorites.push(id);
+      }
+    }
+    expect(renderedFavorites).toEqual(['triangle', 'pentagon', 'rectangle']);
+  });
+
+  it('drops orphan ids on hydration (shape removed in a later release)', async () => {
+    // Spec §5.2: a future shape removal must auto-clean the user's
+    // list so cap accounting and grid render don't drift. Seed with
+    // one real id and one synthetic — only the real one should
+    // survive into the grid.
+    const seeded = createMemoryFavoritesStorage([
+      'circle',
+      'no_longer_a_real_shape' as ShapeId,
+    ]);
+    const tree = await mountPalette(seeded);
+    await navigateToCategory(tree, 'favorites');
+    expect(() => findByTestID(tree, TEST_IDS.cell('circle'))).not.toThrow();
+    // Subsequent toggle persists the sanitised list — the synthetic
+    // must not round-trip back to storage.
+    await selectShape(tree, 'circle');
+    await tapFavorite(tree); // remove circle
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(await seeded.load()).toEqual([]);
+  });
+
+  it('disables the heart toggle until storage hydration completes', async () => {
+    // Construct a storage whose load() never resolves so we can
+    // observe the pre-hydration UI state. Without the hydration gate,
+    // a fast user tap would mutate the empty placeholder array; the
+    // delayed load() callback would then clobber it on resolution.
+    const neverResolves: FavoritesStorage = {
+      load: () => new Promise<readonly ShapeId[]>(() => {}),
+      save: async () => {},
+    };
+    let tree: ReactTestRenderer;
+    act(() => {
+      tree = create(<ShapePalette storage={neverResolves} />);
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    const toggle = findByTestID(tree!, TEST_IDS.favoriteToggle);
+    expect(toggle.props.disabled).toBe(true);
+  });
+
+  it('navigation auto-selects the first favorited shape when entering Favorites', async () => {
+    // Seeded so the carousel has a non-empty favorites bucket to land on.
+    const seeded = createMemoryFavoritesStorage(['octagon', 'circle']);
+    const tree = await mountPalette(seeded);
+    await navigateToCategory(tree, 'favorites');
+    // Auto-select rule: the first shape in the new category becomes
+    // the active selection so the preview shows something sensible.
+    const previewIcon = tree.root.findByProps({
+      testID: 'stroke-preview-icon',
+    });
+    expect(previewIcon.props.source).toBe(SHAPE_ICONS.octagon);
+  });
+
+  // The MAX_FAVORITES cap behavior is covered exhaustively at the pure
+  // reducer level in shapes.test.ts (`toggleFavorite returns "capped"
+  // with the input unchanged at the limit`). Exercising it through
+  // the UI here would require seeding storage with MAX_FAVORITES
+  // distinct *valid* shape ids — but with MAX_FAVORITES === SHAPES.length
+  // in the current catalogue, every real shape would already be
+  // favorited and there would be no unfavorited shape to tap. The
+  // post-hydration sanitisation step (which correctly drops synthetic
+  // placeholder ids) closes the synthetic-seed loophole. Once the
+  // catalogue grows past MAX_FAVORITES, add a UI-level cap test here.
+
+  it('does NOT insert when the heart toggle is tapped', async () => {
+    // Heart toggle is a state mutation only — must not commit a shape.
+    const tree = await mountPalette();
+    await tapFavorite(tree);
+    expect(PluginCommAPI.insertGeometry).not.toHaveBeenCalled();
+    expect(PluginManager.closePluginView).not.toHaveBeenCalled();
   });
 
   it('ignores rapid double-tap of the overlay while a commit is in progress', async () => {

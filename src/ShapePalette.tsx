@@ -81,12 +81,20 @@ import {
   CATEGORY_LABELS,
   CATEGORY_ORDER,
   shapesInCategory,
+  favoriteShapes,
+  isFavorite,
+  toggleFavorite,
+  MAX_FAVORITES,
   nextCategory,
   WIDTH_PRESETS,
   COLOR_PRESETS,
   isAcceptablePenWidth,
 } from './shapes';
 import StrokePreview from './StrokePreview';
+import {
+  FavoritesStorage,
+  getDefaultFavoritesStorage,
+} from './favoritesStorage';
 
 // 2026-04-18 design change: the Pen Type picker is intentionally NOT
 // rendered here. Pen type is already a top-level selection in the
@@ -134,6 +142,15 @@ export const TEST_IDS = {
   groupPrev: 'shapes-group-prev',
   groupNext: 'shapes-group-next',
   groupLabel: 'shapes-group-label',
+  // Favorites controls (added v1.0.5). The heart toggle lives in the
+  // preview column so the affordance only appears once a shape is
+  // selected — matching the user's mental model "select a shape, then
+  // favorite it" — and the larger single hit-target avoids cluttering
+  // every grid cell with a 14-px tap region. The empty-state node
+  // takes over the grid area when the user is on the Favorites
+  // category with no entries.
+  favoriteToggle: 'shapes-favorite-toggle',
+  favoritesEmpty: 'shapes-favorites-empty',
 } as const;
 
 /**
@@ -234,11 +251,25 @@ const GRID_VERTICAL_PADDING_PX = 8;
  * because the grid height wouldn't grow to reveal it. Deriving from
  * CATEGORY_ORDER means a new category is a zero-line change here.
  */
+// Favorites is excluded from the height-derivation walk because its
+// membership is dynamic (user-curated, up to MAX_FAVORITES) — a freshly
+// installed user has 0 favorites and a power user has 30. Sizing the
+// grid for "what if the user fills up favorites" would inflate the
+// panel height for every other category. The Favorites grid scrolls if
+// it ever exceeds the static height; the rest stay un-scrolled.
 const MAX_GRID_ROWS = Math.max(
-  ...CATEGORY_ORDER.map(c =>
+  ...CATEGORY_ORDER.filter(c => c !== 'favorites').map(c =>
     Math.ceil(shapesInCategory(c).length / GRID_COLS),
   ),
 );
+
+/**
+ * Lookup set for "is this string a known shape id?". Built once at
+ * module load from the SHAPES catalogue so the favorites-hydration
+ * filter doesn't have to allocate per call. Kept module-private — if
+ * you need this externally, expose a helper in shapes.ts instead.
+ */
+const KNOWN_SHAPE_IDS: ReadonlySet<ShapeId> = new Set(SHAPES.map(s => s.id));
 
 /**
  * Fixed shapes-grid height. We pin this rather than using maxHeight so
@@ -341,7 +372,17 @@ const ERROR_DISPLAY_MS = 2000;
 // Component
 // ---------------------------------------------------------------------------
 
-export default function ShapePalette() {
+/**
+ * Props are optional so the public mounting path (PluginManager → render)
+ * stays a no-arg component. The `storage` seam exists for tests and for
+ * future native KV backends — production renders use the AsyncStorage
+ * default (or its in-memory fallback when the dep is absent).
+ */
+export type ShapePaletteProps = {
+  storage?: FavoritesStorage;
+};
+
+export default function ShapePalette({storage}: ShapePaletteProps = {}) {
   const insertingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -359,8 +400,26 @@ export default function ShapePalette() {
   // arrows in the header cycle CATEGORY_ORDER with wrap-around. Default
   // category lines up with the default selectedId ('rectangle' ∈ basic)
   // so the initial render is self-consistent without any post-mount work.
+  // We deliberately land on 'basic' rather than CATEGORY_ORDER[0]
+  // ('favorites') because a fresh install has zero favorites — landing
+  // on an empty grid would read as "the plugin is broken" on first use.
+  // 'favorites' is one ◀ tap away.
   const [selectedCategory, setSelectedCategory] =
     useState<ShapeCategory>('basic');
+
+  // Favorites state. Hydrated from `storage` on mount, persisted on every
+  // change after hydration (the `favoritesHydrated` flag suppresses the
+  // initial empty-array save that would otherwise clobber on-disk state
+  // before the load resolves).
+  const [favorites, setFavorites] = useState<readonly ShapeId[]>([]);
+  const [favoritesHydrated, setFavoritesHydrated] = useState(false);
+  // Resolve the storage backend exactly once per mount. Memoised so a
+  // re-render with the same prop doesn't tear down + rebuild the
+  // (potentially native-backed) backend.
+  const storageImpl = useMemo(
+    () => storage ?? getDefaultFavoritesStorage(),
+    [storage],
+  );
 
   // ScrollView ref so we can reset to y=0 whenever the category changes —
   // users scrolled halfway down Basic shouldn't land halfway down Arrows.
@@ -376,12 +435,50 @@ export default function ShapePalette() {
     };
   }, []);
 
-  // Shapes shown in the grid right now — filtered by the current carousel
-  // group. Memoised on `selectedCategory` so the filter cost (O(SHAPES))
-  // only runs on group change, not on every stroke-width tap.
+  // Hydrate favorites from storage on mount. Storage contract guarantees
+  // load() never throws, so no try/catch is needed here.
+  //
+  // Sanitisation: drop ids that no longer correspond to a shape in the
+  // current catalogue. Without this, a shape removed in a later release
+  // would linger in the user's favorites list forever — invisible in
+  // the grid (favoriteShapes filters them at render) but still eating
+  // a MAX_FAVORITES slot and round-tripping back to storage on every
+  // save. KNOWN_SHAPE_IDS is built once at module load (see below), so
+  // the filter is O(F) over the user's list.
+  useEffect(() => {
+    let cancelled = false;
+    storageImpl.load().then(loaded => {
+      if (cancelled) {return;}
+      const sanitized = loaded.filter(id => KNOWN_SHAPE_IDS.has(id));
+      setFavorites(sanitized);
+      setFavoritesHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [storageImpl]);
+
+  // Persist favorites on change. Skipped until hydration completes so
+  // the empty initial state doesn't overwrite the on-disk value before
+  // load() resolves. save() is fire-and-forget — the storage contract
+  // swallows errors and logs them.
+  useEffect(() => {
+    if (!favoritesHydrated) {return;}
+    storageImpl.save(favorites);
+  }, [favorites, favoritesHydrated, storageImpl]);
+
+  // Shapes shown in the grid right now. 'favorites' is dynamically
+  // populated from the user's curated list; every other category is a
+  // static slice of SHAPES. Branching here keeps `shapesInCategory` and
+  // `favoriteShapes` each focused on a single responsibility.
+  // Memoised on (selectedCategory, favorites) so the cost only runs on
+  // group change or a heart toggle — not on every stroke-width tap.
   const visibleShapes = useMemo(
-    () => shapesInCategory(selectedCategory),
-    [selectedCategory],
+    () =>
+      selectedCategory === 'favorites'
+        ? favoriteShapes(favorites)
+        : shapesInCategory(selectedCategory),
+    [selectedCategory, favorites],
   );
 
   const selectedShape = useMemo(
@@ -395,6 +492,14 @@ export default function ShapePalette() {
   const previewType = selectedShape.geometryType;
 
   const previewIcon = SHAPE_ICONS[selectedShape.id];
+
+  // Single source of truth for the heart's visual state — collapsed
+  // here so the JSX below doesn't fork into three (label / state /
+  // glyph) independent O(F) lookups against the favorites array.
+  const selectedIsFavorite = useMemo(
+    () => isFavorite(selectedId, favorites),
+    [selectedId, favorites],
+  );
 
   const showError = useCallback((msg: string) => {
     setError(msg);
@@ -419,6 +524,33 @@ export default function ShapePalette() {
   }, []);
 
   /**
+   * Heart-icon handler in the preview column.
+   *
+   * Gated on `favoritesHydrated`: a tap that lands during the load()
+   * roundtrip would otherwise mutate the empty placeholder array,
+   * which the hydration callback then clobbers with the just-loaded
+   * value — silently losing the user's interaction. Bailing out until
+   * hydration completes keeps every successful toggle observable.
+   *
+   * The reducer call and side effect (`showError`) are kept OUTSIDE
+   * the `setFavorites(prev => …)` updater on purpose: updater functions
+   * are run twice under React StrictMode (dev-only invariance check),
+   * and a side effect inside one would fire twice — duplicating the
+   * banner toast. Computing once, then committing, keeps the handler
+   * idempotent under re-execution.
+   */
+  const handleToggleFavorite = useCallback(() => {
+    if (insertingRef.current) {return;}
+    if (!favoritesHydrated) {return;}
+    const result = toggleFavorite(selectedId, favorites);
+    if (result.status === 'capped') {
+      showError(`Max ${MAX_FAVORITES} favorites reached. Remove one first.`);
+      return;
+    }
+    setFavorites(result.favorites);
+  }, [favorites, favoritesHydrated, selectedId, showError]);
+
+  /**
    * Advance the carousel to the previous (-1) or next (+1) group.
    *
    * Side-effects bundled here so each arrow tap is atomic from the user's
@@ -437,14 +569,22 @@ export default function ShapePalette() {
     if (insertingRef.current) {return;}
     setSelectedCategory(prev => {
       const next = nextCategory(prev, direction);
-      const firstInNext = shapesInCategory(next)[0];
+      // Resolve the new category's first shape via the same dispatch
+      // visibleShapes uses, so favorites and static categories share
+      // the auto-select rule. Empty favorites: leave selectedId as-is
+      // — the preview keeps showing whatever the user was inspecting,
+      // and the empty-state placeholder takes over the grid.
+      const firstInNext =
+        next === 'favorites'
+          ? favoriteShapes(favorites)[0]
+          : shapesInCategory(next)[0];
       if (firstInNext) {setSelectedId(firstInNext.id);}
       // Schedule the scroll reset for after the state flush. scrollTo on
       // a not-yet-updated ScrollView is a no-op but safe.
       gridScrollRef.current?.scrollTo({y: 0, animated: false});
       return next;
     });
-  }, []);
+  }, [favorites]);
 
   /**
    * Tapping OUTSIDE the panel = "commit and close". Replaces the old
@@ -538,11 +678,17 @@ export default function ShapePalette() {
                 ref={gridScrollRef}
                 style={styles.gridScroll}
                 contentContainerStyle={styles.gridContainer}>
-                <ShapeGrid
-                  shapes={visibleShapes}
-                  selectedId={selectedId}
-                  onSelect={handleShapeTap}
-                />
+                {selectedCategory === 'favorites' && visibleShapes.length === 0 ? (
+                  <Text testID={TEST_IDS.favoritesEmpty} style={styles.favoritesEmpty}>
+                    No favorites yet.{'\n'}Tap ♡ to add a shape.
+                  </Text>
+                ) : (
+                  <ShapeGrid
+                    shapes={visibleShapes}
+                    selectedId={selectedId}
+                    onSelect={handleShapeTap}
+                  />
+                )}
               </ScrollView>
             </View>
 
@@ -554,6 +700,43 @@ export default function ShapePalette() {
                 penType={style.penType}
                 iconSource={previewIcon}
               />
+              {/*
+                Heart toggle for the currently-selected shape. Sits in
+                the preview column rather than on every grid cell so the
+                affordance is single + large (better tap target on
+                e-ink) and the grid stays uncluttered. Disabled while
+                the favorites list is empty AND we're on the favorites
+                tab — there's nothing to "unfavorite" because no shape
+                is meaningfully selected on the empty grid; toggling
+                from another tab works as usual.
+              */}
+              <Pressable
+                testID={TEST_IDS.favoriteToggle}
+                onPress={handleToggleFavorite}
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  selectedIsFavorite
+                    ? 'Remove from favorites'
+                    : 'Add to favorites'
+                }
+                accessibilityState={{selected: selectedIsFavorite}}
+                disabled={
+                  // Disabled while load() is still in flight (taps
+                  // would otherwise be silently dropped by the
+                  // hydration gate inside the handler) and on the
+                  // empty-favorites tab (no meaningful target).
+                  !favoritesHydrated ||
+                  (selectedCategory === 'favorites' && favorites.length === 0)
+                }
+                style={({pressed}) => [
+                  styles.favoriteBtn,
+                  pressed && styles.favoriteBtnPressed,
+                ]}>
+                <Text style={styles.favoriteIcon}>
+                  {selectedIsFavorite ? '❤' : '♡'}
+                </Text>
+              </Pressable>
             </View>
           </View>
 
@@ -956,5 +1139,39 @@ const styles = StyleSheet.create({
     color: '#555555',
     paddingTop: 8,
     paddingHorizontal: PANEL_PADDING,
+  },
+  // Heart toggle for the currently-selected shape. Sits below the
+  // StrokePreview so the user reads top-to-bottom: "this is the shape /
+  // this is its preview / favorite this shape". Glyph size matches the
+  // carousel arrows (20 px) so the two affordances read at the same
+  // visual weight.
+  favoriteBtn: {
+    alignSelf: 'center',
+    marginTop: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  favoriteBtnPressed: {
+    backgroundColor: '#D8D8D8',
+  },
+  favoriteIcon: {
+    fontSize: 20,
+    color: '#000000',
+    textAlign: 'center',
+    // Tighten line height so the glyph doesn't add vertical drift to the
+    // preview column — at 20 px the default RN line height (~1.2x) would
+    // bump the column ~4 px taller than its sibling.
+    lineHeight: 22,
+  },
+  // Placeholder shown when the user opens Favorites with an empty list.
+  // Centred inside the same fixed-height grid the other categories use,
+  // so the panel footprint stays constant.
+  favoritesEmpty: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: '#555555',
+    paddingTop: 24,
+    paddingHorizontal: 8,
   },
 });
