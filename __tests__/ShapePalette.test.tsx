@@ -25,16 +25,15 @@ import ShapePalette, {
 import {
   SHAPES,
   ShapeId,
+  ShapeCategory,
   PEN_DEFAULTS,
   CATEGORY_ORDER,
   CATEGORY_LABELS,
   shapesInCategory,
   nextCategory,
-} from '../src/shapes';
-import {
   WIDTH_PRESETS,
   COLOR_PRESETS,
-} from '../src/ShapeOptionsPanel';
+} from '../src/shapes';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
 import {
   PluginCommAPI,
@@ -558,7 +557,7 @@ describe('ShapePalette (merged popup)', () => {
 
   it('next arrow advances the label through CATEGORY_ORDER (with wrap)', async () => {
     const tree = await mountPalette();
-    let current = 'basic' as const;
+    let current: ShapeCategory = 'basic';
     // Walk the full cycle; after N taps we must land on the starting label.
     for (let i = 0; i < CATEGORY_ORDER.length; i++) {
       await tapGroupNext(tree);

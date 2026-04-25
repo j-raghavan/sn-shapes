@@ -37,7 +37,7 @@ import {
   formatPenWidthMm,
   penColorToSwatch,
   PEN_TYPE_PRESETS,
-} from './ShapeOptionsPanel';
+} from './shapes';
 
 export const TEST_IDS = {
   container: 'stroke-preview',

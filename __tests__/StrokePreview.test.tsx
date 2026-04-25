@@ -4,10 +4,9 @@
  * color conversion logic directly and the rest of the panel stays
  * orthogonal.
  *
- * We still mock sn-plugin-lib because StrokePreview imports the
- * `formatPenWidthMm` / `penColorToSwatch` helpers from ShapeOptionsPanel,
- * which itself imports PluginCommAPI. Jest can't parse sn-plugin-lib's
- * ESM source without the mock.
+ * No sn-plugin-lib mock is needed here: StrokePreview imports helpers
+ * (`formatPenWidthMm`, `penColorToSwatch`, `PEN_TYPE_PRESETS`) directly
+ * from shapes.ts, which has no sn-plugin-lib dependency.
  *
  * Two render paths are covered:
  *   - iconSource provided → renders the PNG icon tinted with pen colour
@@ -15,11 +14,6 @@
  *   - iconSource omitted → falls back to the geometry-type-dispatched
  *     View with StyleSheet borders (kept for loading / future shapes).
  */
-jest.mock('sn-plugin-lib', () => ({
-  PluginCommAPI: {},
-  PluginManager: {},
-}));
-
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
 import StrokePreview, {

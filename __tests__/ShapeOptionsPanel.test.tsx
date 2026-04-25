@@ -49,14 +49,14 @@ jest.mock('sn-plugin-lib', () => ({
   },
 }));
 
-import ShapeOptionsPanel, {
-  TEST_IDS,
+import ShapeOptionsPanel, {TEST_IDS} from '../src/ShapeOptionsPanel';
+import {
   WIDTH_PRESETS,
   COLOR_PRESETS,
   PEN_TYPE_PRESETS,
   MIN_PEN_WIDTH,
   isAcceptablePenWidth,
-} from '../src/ShapeOptionsPanel';
+} from '../src/shapes';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
 import {PluginCommAPI, PluginManager} from 'sn-plugin-lib';
 

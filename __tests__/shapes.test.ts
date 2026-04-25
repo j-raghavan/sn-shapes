@@ -184,6 +184,13 @@ describe('SHAPES', () => {
       expect(typeof geo.type).toBe('string');
     });
 
+    it('geometryType field matches the actual build result type', () => {
+      // Ensures the static `shape.geometryType` declaration stays in sync
+      // with what `build` actually produces. TypeScript enforces the field
+      // exists; this test enforces it has the correct value.
+      expect(shape.geometryType).toBe(geo.type);
+    });
+
     it('carries the default pen properties', () => {
       expectPenDefaults(geo);
     });

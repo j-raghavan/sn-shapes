@@ -171,6 +171,12 @@ export type Shape = {
    */
   readonly category: ShapeCategory | readonly ShapeCategory[];
   readonly parameters: readonly ShapeParameter[];
+  /**
+   * Static geometry discriminant — matches the `type` field that `build`
+   * returns. Declared here so callers can inspect the geometry kind
+   * without building a full Geometry object.
+   */
+  readonly geometryType: Geometry['type'];
   build: (center: Point, params: Record<string, number>, style: PenStyle) => ShapeBuildResult;
 };
 
@@ -183,6 +189,80 @@ export const PEN_DEFAULTS: PenStyle = {
   // accepts any value ≥ MIN_PEN_WIDTH, so this is purely a UI default.
   penWidth: 500,
 };
+
+// ---------------------------------------------------------------------------
+// Pen-style presets and helpers
+// ---------------------------------------------------------------------------
+// These constants and utilities live alongside PEN_DEFAULTS and PenStyle so
+// that any component can import them without pulling in React Native UI code.
+// They were originally defined in ShapeOptionsPanel.tsx; moved here so the
+// shapes module is the single source of truth for all pen-style domain
+// knowledge.
+
+/** Firmware floor for penWidth (GeometrySchema.penWidth min in VerifyUtils.ts). */
+export const MIN_PEN_WIDTH = 100;
+
+/**
+ * True iff `value` is a finite number at or above the firmware's penWidth
+ * floor. Pure so it can be unit-tested directly without rendering.
+ */
+export function isAcceptablePenWidth(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= MIN_PEN_WIDTH
+  );
+}
+
+// Pen-width presets. GeometrySchema.penWidth requires min: MIN_PEN_WIDTH;
+// units are micrometres so `penWidth / 1000 = mm`. Five ticks labelled
+// XS/S/M/L/XL — even spacing across the firmware-supported range.
+export const WIDTH_PRESETS: ReadonlyArray<{value: number; mm: number; label: string}> = [
+  {value: 100, mm: 0.10, label: 'XS'},
+  {value: 300, mm: 0.30, label: 'S'},
+  {value: 500, mm: 0.50, label: 'M'},
+  {value: 700, mm: 0.70, label: 'L'},
+  {value: 900, mm: 0.90, label: 'XL'},
+];
+
+export function formatPenWidthMm(penWidth: number | undefined): string {
+  if (typeof penWidth !== 'number' || !Number.isFinite(penWidth)) {return '—';}
+  return `${(penWidth / 1000).toFixed(2)} mm`;
+}
+
+// Pen-color presets: the five allow-listed grey levels from the firmware's
+// PEN_COLORS constant in Constant.java. True white (0xFE/0xFF) is omitted
+// because it is invisible on white paper.
+export const COLOR_PRESETS: ReadonlyArray<{value: number; label: string; swatch: string}> = [
+  {value: 0x00, label: 'Black',  swatch: '#000000'},
+  {value: 0x9D, label: 'Dark+',  swatch: '#5A5A5A'},
+  {value: 0x9E, label: 'Dark',   swatch: '#7A7A7A'},
+  {value: 0xC9, label: 'Light',  swatch: '#B0B0B0'},
+  {value: 0xCA, label: 'Light+', swatch: '#CCCCCC'},
+];
+
+/**
+ * Map a firmware penColor byte to a CSS #RRGGBB preview swatch. Swatches
+ * are tuned to the on-device visual density rather than the raw byte value.
+ * Falls back to raw grayscale for bytes not in COLOR_PRESETS.
+ */
+export function penColorToSwatch(penColor: number | undefined): string {
+  if (typeof penColor !== 'number' || !Number.isFinite(penColor)) {return '#000000';}
+  const preset = COLOR_PRESETS.find(c => c.value === penColor);
+  if (preset) {return preset.swatch;}
+  const clamped = Math.max(0, Math.min(255, Math.round(penColor)));
+  const hex = clamped.toString(16).padStart(2, '0').toUpperCase();
+  return `#${hex}${hex}${hex}`;
+}
+
+// Pen-type presets from the firmware allow-list (Constant.java → PEN_TYPES).
+// Order matches the sidebar pen order on Nomad so the mental model transfers.
+export const PEN_TYPE_PRESETS: ReadonlyArray<{value: number; label: string}> = [
+  {value: 10, label: 'Fineliner'},
+  {value: 1,  label: 'Pressure'},
+  {value: 11, label: 'Marker'},
+  {value: 14, label: 'Calligraphy'},
+];
 
 export function regularPolygon(
   center: Point,
@@ -263,6 +343,7 @@ function arcPoints(
 }
 
 function makePolygon(points: Point[], style: PenStyle): PolygonGeometry {
+  if (points.length < 3) {throw new Error(`makePolygon requires at least 3 points, got ${points.length}`);}
   const closed = [...points, points[0]];
   return {...style, type: 'GEO_polygon', points: closed};
 }
@@ -298,11 +379,35 @@ const REGULAR_POLYGONS = [
   ['octagon', 'Octagon', 8],
 ] as const;
 
-export const SHAPES: Shape[] = [
+/**
+ * Shared vertex builder for the right-pointing block-arrow family
+ * (blockArrow, thickArrow, chevronTailArrow). Returns the 7 outline vertices
+ * clockwise from tail-top-left; chevronTailArrow appends one extra vertex for
+ * its V-notch. Centralising the formula here means blockArrow and thickArrow
+ * differ only in their parameter defaults, with no duplicated geometry logic.
+ */
+function buildBlockArrowPoints(center: Point, params: Record<string, number>): Point[] {
+  const hl = params.length / 2;
+  const sh = params.shaftWidth / 2;
+  const hh = params.headWidth / 2;
+  const shaftEnd = center.x + hl - params.headLength;
+  return [
+    {x: center.x - hl, y: center.y - sh},
+    {x: shaftEnd,       y: center.y - sh},
+    {x: shaftEnd,       y: center.y - hh},
+    {x: center.x + hl,  y: center.y},
+    {x: shaftEnd,       y: center.y + hh},
+    {x: shaftEnd,       y: center.y + sh},
+    {x: center.x - hl,  y: center.y + sh},
+  ];
+}
+
+export const SHAPES: readonly Shape[] = [
   {
     id: 'rectangle',
     label: 'Rectangle',
     category: 'basic',
+    geometryType: 'GEO_polygon',
     parameters: [
       { id: 'width',
         label: 'Width (px)',
@@ -336,6 +441,7 @@ export const SHAPES: Shape[] = [
     id: 'circle',
     label: 'Circle',
     category: 'basic',
+    geometryType: 'GEO_circle',
     parameters: [
       { id: 'radius',
         label: 'Radius (px)',
@@ -355,6 +461,7 @@ export const SHAPES: Shape[] = [
     id: 'roundedRect',
     label: 'Rounded Rectangle',
     category: 'basic',
+    geometryType: 'GEO_polygon',
     parameters: [
       {
         id: 'width',
@@ -394,6 +501,7 @@ export const SHAPES: Shape[] = [
     id: 'ellipse',
     label: 'Ellipse',
     category: 'basic',
+    geometryType: 'GEO_ellipse',
     parameters: [
       {
         id: 'radiusX',
@@ -417,6 +525,7 @@ export const SHAPES: Shape[] = [
     id: 'line',
     label: 'Line',
     category: 'basic',
+    geometryType: 'straightLine',
     parameters: [
       {
         id: 'length',
@@ -449,6 +558,7 @@ export const SHAPES: Shape[] = [
     id: 'parallelogram',
     label: 'Parallelogram',
     category: 'basic',
+    geometryType: 'GEO_polygon',
     parameters: [
       {
         id: 'width',
@@ -492,6 +602,7 @@ export const SHAPES: Shape[] = [
     id,
     label,
     category: 'basic',
+    geometryType: 'GEO_polygon',
     parameters: [
       {
         id: 'radius',
@@ -534,36 +645,22 @@ export const SHAPES: Shape[] = [
     id: 'blockArrow',
     label: 'Block Arrow',
     category: 'arrows',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'length', label: 'Length (px)', defaultValue: 260, min: 1, unit: 'px'},
       {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 80, min: 1, unit: 'px'},
       {id: 'headWidth', label: 'Head Width (px)', defaultValue: 160, min: 1, unit: 'px'},
       {id: 'headLength', label: 'Head Length (px)', defaultValue: 90, min: 1, unit: 'px'},
     ],
-    build: (center, params, style) => {
-      const hl = params.length / 2;
-      const sh = params.shaftWidth / 2;
-      const hh = params.headWidth / 2;
-      const shaftEnd = center.x + hl - params.headLength;
-      return makePolygon(
-        [
-          {x: center.x - hl, y: center.y - sh},
-          {x: shaftEnd, y: center.y - sh},
-          {x: shaftEnd, y: center.y - hh},
-          {x: center.x + hl, y: center.y},
-          {x: shaftEnd, y: center.y + hh},
-          {x: shaftEnd, y: center.y + sh},
-          {x: center.x - hl, y: center.y + sh},
-        ],
-        style,
-      );
-    },
+    build: (center, params, style) =>
+      makePolygon(buildBlockArrowPoints(center, params), style),
   },
 
   {
     id: 'doubleArrow',
     label: 'Double Arrow',
     category: 'arrows',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'length', label: 'Length (px)', defaultValue: 300, min: 1, unit: 'px'},
       {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 70, min: 1, unit: 'px'},
@@ -598,6 +695,7 @@ export const SHAPES: Shape[] = [
     id: 'thickArrow',
     label: 'Thick Arrow',
     category: 'arrows',
+    geometryType: 'GEO_polygon',
     parameters: [
       // Same signature as blockArrow but with a fatter shaft and a
       // smaller head so the arrow reads as "chunky". Sharing the
@@ -608,30 +706,15 @@ export const SHAPES: Shape[] = [
       {id: 'headWidth', label: 'Head Width (px)', defaultValue: 200, min: 1, unit: 'px'},
       {id: 'headLength', label: 'Head Length (px)', defaultValue: 80, min: 1, unit: 'px'},
     ],
-    build: (center, params, style) => {
-      const hl = params.length / 2;
-      const sh = params.shaftWidth / 2;
-      const hh = params.headWidth / 2;
-      const shaftEnd = center.x + hl - params.headLength;
-      return makePolygon(
-        [
-          {x: center.x - hl, y: center.y - sh},
-          {x: shaftEnd, y: center.y - sh},
-          {x: shaftEnd, y: center.y - hh},
-          {x: center.x + hl, y: center.y},
-          {x: shaftEnd, y: center.y + hh},
-          {x: shaftEnd, y: center.y + sh},
-          {x: center.x - hl, y: center.y + sh},
-        ],
-        style,
-      );
-    },
+    build: (center, params, style) =>
+      makePolygon(buildBlockArrowPoints(center, params), style),
   },
 
   {
     id: 'ballArrow',
     label: 'Ball Arrow',
     category: 'arrows',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'length', label: 'Length (px)', defaultValue: 280, min: 1, unit: 'px'},
       {id: 'ballRadius', label: 'Ball (px)', defaultValue: 45, min: 1, unit: 'px'},
@@ -678,6 +761,7 @@ export const SHAPES: Shape[] = [
     id: 'chevronTailArrow',
     label: 'Chevron Tail Arrow',
     category: 'arrows',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'length', label: 'Length (px)', defaultValue: 280, min: 1, unit: 'px'},
       {id: 'shaftWidth', label: 'Shaft (px)', defaultValue: 80, min: 1, unit: 'px'},
@@ -692,19 +776,10 @@ export const SHAPES: Shape[] = [
       // direction without the double-headed-arrow implication of
       // doubleArrow.
       const hl = params.length / 2;
-      const sh = params.shaftWidth / 2;
-      const hh = params.headWidth / 2;
-      const shaftEnd = center.x + hl - params.headLength;
       const notch = Math.min(params.tailNotch, params.length * 0.45);
       return makePolygon(
         [
-          {x: center.x - hl, y: center.y - sh},
-          {x: shaftEnd, y: center.y - sh},
-          {x: shaftEnd, y: center.y - hh},
-          {x: center.x + hl, y: center.y},
-          {x: shaftEnd, y: center.y + hh},
-          {x: shaftEnd, y: center.y + sh},
-          {x: center.x - hl, y: center.y + sh},
+          ...buildBlockArrowPoints(center, params),
           // Tail chevron: indent inward to the middle, then back out.
           {x: center.x - hl + notch, y: center.y},
         ],
@@ -717,6 +792,7 @@ export const SHAPES: Shape[] = [
     id: 'refreshArrow',
     label: 'Refresh Arrow',
     category: 'arrows',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'radius', label: 'Radius (px)', defaultValue: 110, min: 1, unit: 'px'},
       {id: 'band', label: 'Band (px)', defaultValue: 42, min: 1, unit: 'px'},
@@ -772,6 +848,7 @@ export const SHAPES: Shape[] = [
     id: 'flowchartPreparation',
     label: 'Preparation',
     category: 'flowchart',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 140, min: 1, unit: 'px'},
@@ -799,6 +876,7 @@ export const SHAPES: Shape[] = [
     id: 'flowchartDocument',
     label: 'Document',
     category: 'flowchart',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 180, min: 1, unit: 'px'},
@@ -830,6 +908,7 @@ export const SHAPES: Shape[] = [
     id: 'flowchartTerminator',
     label: 'Terminator',
     category: 'flowchart',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 120, min: 1, unit: 'px'},
@@ -851,6 +930,7 @@ export const SHAPES: Shape[] = [
     id: 'flowchartManualInput',
     label: 'Manual Input',
     category: 'flowchart',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 160, min: 1, unit: 'px'},
@@ -882,6 +962,7 @@ export const SHAPES: Shape[] = [
     id: 'certificate',
     label: 'Certificate',
     category: 'decorative',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 300, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 200, min: 1, unit: 'px'},
@@ -917,6 +998,7 @@ export const SHAPES: Shape[] = [
     id: 'ribbon',
     label: 'Ribbon',
     category: 'decorative',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 320, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 90, min: 1, unit: 'px'},
@@ -948,6 +1030,7 @@ export const SHAPES: Shape[] = [
     id: 'banner',
     label: 'Banner',
     category: 'decorative',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 280, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 100, min: 1, unit: 'px'},
@@ -977,6 +1060,7 @@ export const SHAPES: Shape[] = [
     id: 'starburst',
     label: 'Starburst',
     category: 'decorative',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 320, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 220, min: 1, unit: 'px'},
@@ -1024,6 +1108,7 @@ export const SHAPES: Shape[] = [
     id: 'awardBadge',
     label: 'Award Badge',
     category: 'decorative',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'radius', label: 'Medallion (px)', defaultValue: 90, min: 10, unit: 'px'},
       {id: 'tailLength', label: 'Tail (px)', defaultValue: 140, min: 0, unit: 'px'},
@@ -1177,6 +1262,7 @@ export const SHAPES: Shape[] = [
     id: 'plus',
     label: 'Plus',
     category: 'others',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'size', label: 'Size (px)', defaultValue: 200, min: 1, unit: 'px'},
       {id: 'thickness', label: 'Arm (px)', defaultValue: 60, min: 1, unit: 'px'},
@@ -1210,6 +1296,7 @@ export const SHAPES: Shape[] = [
     id: 'lightning',
     label: 'Lightning',
     category: 'others',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 140, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 260, min: 1, unit: 'px'},
@@ -1242,6 +1329,7 @@ export const SHAPES: Shape[] = [
     // doesn't need a pin-bump. Users still find it quickly — "Others"
     // is the most-scrolled-to bucket for misc primitives.
     category: 'others',
+    geometryType: 'GEO_polygon',
     parameters: [
       {id: 'width', label: 'Width (px)', defaultValue: 240, min: 1, unit: 'px'},
       {id: 'height', label: 'Height (px)', defaultValue: 160, min: 1, unit: 'px'},

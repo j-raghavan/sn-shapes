@@ -44,10 +44,11 @@
  *     offered was already set at insert time. Per user direction
  *     2026-04-18, the id=200 button + ShapeOptionsPanel routing were
  *     removed; this popup is now the only entry point for shapes.
- *   - ShapeOptionsPanel.tsx itself is kept on disk because it owns the
- *     WIDTH_PRESETS / COLOR_PRESETS / PEN_TYPE_PRESETS constants and
- *     helper utilities that this popup imports. The component export is
- *     no longer rendered anywhere; only its constants are used.
+ *   - ShapeOptionsPanel.tsx is retained as dead product code: it
+ *     implements the lasso-toolbar re-style panel that may be revived
+ *     in a future release. The WIDTH_PRESETS / COLOR_PRESETS /
+ *     PEN_TYPE_PRESETS constants it used to own have all been moved to
+ *     shapes.ts. Nothing in ShapePalette imports from ShapeOptionsPanel.
  *
  * Why deferred-apply (instead of tap-to-insert + style after):
  *   - Firmware bug: modifyLassoGeometry silently drops pen props in
@@ -81,12 +82,10 @@ import {
   CATEGORY_ORDER,
   shapesInCategory,
   nextCategory,
-} from './shapes';
-import {
   WIDTH_PRESETS,
   COLOR_PRESETS,
   isAcceptablePenWidth,
-} from './ShapeOptionsPanel';
+} from './shapes';
 import StrokePreview from './StrokePreview';
 
 // 2026-04-18 design change: the Pen Type picker is intentionally NOT
@@ -267,8 +266,13 @@ type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | nu
 
 async function resolvePageSize(): Promise<{width: number; height: number}> {
   try {
-    const pathRes = (await PluginCommAPI.getCurrentFilePath()) as ApiRes<string>;
-    const pageRes = (await PluginCommAPI.getCurrentPageNum()) as ApiRes<number>;
+    // Fire both independent calls concurrently; getPageSize waits for both.
+    const [pathRaw, pageRaw] = await Promise.all([
+      PluginCommAPI.getCurrentFilePath(),
+      PluginCommAPI.getCurrentPageNum(),
+    ]);
+    const pathRes = pathRaw as ApiRes<string>;
+    const pageRes = pageRaw as ApiRes<number>;
     if (
       pathRes?.success &&
       pageRes?.success &&
@@ -333,21 +337,6 @@ async function insertShape(
 
 const ERROR_DISPLAY_MS = 2000;
 
-/**
- * Pick the geometry type for the StrokePreview fallback. Builds the
- * shape with default params + the current style at the page origin,
- * just to read its `type` field (GEO_polygon / GEO_circle /
- * GEO_ellipse / straightLine). Pure — no side effects. Only consulted
- * when the preview can't render from the PNG icon for some reason.
- */
-function previewShapeType(shape: Shape, style: PenStyle): string | undefined {
-  const CENTER = {x: 0, y: 0};
-  const params = Object.fromEntries(
-    shape.parameters.map(p => [p.id, p.defaultValue]),
-  );
-  return shape.build(CENTER, params, style).type;
-}
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -400,10 +389,10 @@ export default function ShapePalette() {
     [selectedId],
   );
 
-  const previewType = useMemo(
-    () => previewShapeType(selectedShape, style),
-    [selectedShape, style],
-  );
+  // `geometryType` is a static field on each Shape — no build call needed.
+  // Used by StrokePreview's fallback path (no iconSource); in practice
+  // all shapes have icons so the icon path always wins.
+  const previewType = selectedShape.geometryType;
 
   const previewIcon = SHAPE_ICONS[selectedShape.id];
 
@@ -659,8 +648,8 @@ function ShapeGrid({shapes, selectedId, onSelect}: ShapeGridProps) {
   }
   return (
     <View>
-      {rows.map((row, idx) => (
-        <View key={idx} style={styles.gridRow}>
+      {rows.map(row => (
+        <View key={row[0].id} style={styles.gridRow}>
           {row.map(shape => {
             const isSelected = selectedId === shape.id;
             return (
