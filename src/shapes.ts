@@ -877,6 +877,40 @@ export const SHAPES: readonly Shape[] = [
       ),
   },
 
+  {
+    id: 'cylinder',
+    label: 'Cylinder',
+    category: 'threeD',
+    geometryType: 'GEO_polygon',
+    parameters: [
+      {id: 'radiusX', label: 'Radius (px)', defaultValue: 90, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 200, min: 1, unit: 'px'},
+      {id: 'capRatio', label: 'Cap (%)', defaultValue: 28, min: 10, max: 60, unit: '%'},
+    ],
+    build: (center, params, style) => {
+      // Full top ellipse rim + front half of the bottom ellipse + two
+      // vertical seams, traced as one loop. The cap is foreshortened
+      // (ry < rx) so the rims read as ellipses, not circles. No edge is
+      // retraced (F5-AC1); makePolygon's closing seam is the single top
+      // chord, which is one new edge (not a duplicate).
+      const rx = params.radiusX;
+      const ry = (rx * params.capRatio) / 100;
+      const topC: Point = {x: center.x, y: center.y - params.height / 2};
+      const botC: Point = {x: center.x, y: center.y + params.height / 2};
+      // ≥24 segments on the full top rim keeps it smooth at icon + page
+      // scale, mirroring how the arrow arcs size their sampling.
+      const TOP_SEGMENTS = 32;
+      const BOT_SEGMENTS = 16;
+      const leftBottom: Point = {x: botC.x - rx, y: botC.y};
+      const rightTop: Point = {x: topC.x + rx, y: topC.y};
+      // Top rim: full ellipse starting and ending at the left point (π).
+      const topRim = ellipseArcPoints(topC, rx, ry, Math.PI, Math.PI + 2 * Math.PI, TOP_SEGMENTS);
+      // Bottom rim: front half only (left π → right 0, through +y front).
+      const botFront = ellipseArcPoints(botC, rx, ry, Math.PI, 0, BOT_SEGMENTS);
+      return makePolygon([...topRim, leftBottom, ...botFront, rightTop], style);
+    },
+  },
+
   // ---------------------------------------------------------------------------
   // v1.0.4 — Arrows
   // ---------------------------------------------------------------------------

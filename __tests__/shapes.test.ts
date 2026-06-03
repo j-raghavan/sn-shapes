@@ -427,6 +427,39 @@ describe('squarePyramid', () => {
   });
 });
 
+describe('cylinder', () => {
+  it('builds one closed GEO_polygon', () => {
+    const geo = buildShape('cylinder');
+    assertPolygon(geo);
+    expect(geo.points[0]).toEqual(geo.points[geo.points.length - 1]);
+  });
+
+  it('retraces no edge (F5-AC1)', () => {
+    const geo = buildShape('cylinder');
+    assertPolygon(geo);
+    expect(retracedEdges(geo.points)).toEqual([]);
+  });
+
+  it('bounding box is ~2*radiusX wide and ~height + 2*ry tall (F5-AC2)', () => {
+    const geo = buildShape('cylinder');
+    assertPolygon(geo);
+    const b = bbox(geo.points);
+    const rx = 90;
+    const height = 200;
+    const ry = (rx * 28) / 100;
+    expect(b.maxX - b.minX).toBeCloseTo(2 * rx, 3);
+    expect(b.maxY - b.minY).toBeCloseTo(height + 2 * ry, 3);
+  });
+
+  it('is bounding-box centered on center (INV6 / F5-FR5)', () => {
+    const geo = buildShape('cylinder');
+    assertPolygon(geo);
+    const b = bbox(geo.points);
+    expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 3);
+    expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 3);
+  });
+});
+
 describe('SHAPES', () => {
   it('each shape has a unique id', () => {
     const ids = SHAPES.map(s => s.id);
