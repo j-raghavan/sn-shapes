@@ -460,6 +460,51 @@ describe('cylinder', () => {
   });
 });
 
+describe('cone', () => {
+  it('builds one closed GEO_polygon (F6-AC1)', () => {
+    const geo = buildShape('cone');
+    assertPolygon(geo);
+    expect(geo.points[0]).toEqual(geo.points[geo.points.length - 1]);
+  });
+
+  it('fills a bbox centered on center, vertical midpoint == center.y (F6-AC1)', () => {
+    const geo = buildShape('cone');
+    assertPolygon(geo);
+    const b = bbox(geo.points);
+    const rx = 90;
+    const height = 200;
+    const ry = (rx * 28) / 100;
+    expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 3);
+    expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 3);
+    expect(b.maxX - b.minX).toBeCloseTo(2 * rx, 3);
+    expect(b.maxY - b.minY).toBeCloseTo(height + ry, 3);
+  });
+
+  it('apex is the topmost vertex, above base extremes by ~height (F6-AC2)', () => {
+    const geo = buildShape('cone');
+    assertPolygon(geo);
+    const apex = geo.points[0];
+    // build emits [apex, ...baseFront, apex] and makePolygon appends the
+    // closing apex, so the pure base-arc vertices are the interior slice
+    // between the first apex and the two trailing apex copies.
+    const base = geo.points.slice(1, geo.points.length - 2);
+    // Apex is strictly above every base vertex.
+    base.forEach(p => expect(apex.y).toBeLessThan(p.y));
+    // Axial height: apex to the base centerline (baseCenter.y). The base
+    // left/right extremes sit on that centerline (angle π and 0, sin 0).
+    const baseCenterY = Math.min(...base.map(p => p.y)); // base endpoints
+    expect(baseCenterY - apex.y).toBeCloseTo(200, 3); // default height
+  });
+
+  it('retraces no edge, excluding the zero-length apex close (F6-AC4)', () => {
+    const geo = buildShape('cone');
+    assertPolygon(geo);
+    // edgeCounts drops zero-length seams (the apex→apex close), so this is
+    // the F6-AC4 assertion directly.
+    expect(retracedEdges(geo.points)).toEqual([]);
+  });
+});
+
 describe('SHAPES', () => {
   it('each shape has a unique id', () => {
     const ids = SHAPES.map(s => s.id);

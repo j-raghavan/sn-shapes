@@ -181,6 +181,7 @@ export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
   cube: require('../assets/shapes/shape_cube.png'),
   squarePyramid: require('../assets/shapes/shape_squarePyramid.png'),
   cylinder: require('../assets/shapes/shape_cylinder.png'),
+  cone: require('../assets/shapes/shape_cone.png'),
   // Arrows
   blockArrow: require('../assets/shapes/shape_blockArrow.png'),
   doubleArrow: require('../assets/shapes/shape_doubleArrow.png'),

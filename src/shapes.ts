@@ -911,6 +911,38 @@ export const SHAPES: readonly Shape[] = [
     },
   },
 
+  {
+    id: 'cone',
+    label: 'Cone',
+    category: 'threeD',
+    geometryType: 'GEO_polygon',
+    parameters: [
+      {id: 'radiusX', label: 'Radius (px)', defaultValue: 90, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 200, min: 1, unit: 'px'},
+      {id: 'capRatio', label: 'Cap (%)', defaultValue: 28, min: 10, max: 60, unit: '%'},
+    ],
+    build: (center, params, style) => {
+      // Apex + front half of the elliptical base + two straight slant
+      // seams, as one closed polygon with no retracing (F6-AC4). The base
+      // front arc dips ry below baseCenter, so the apex/base stack is
+      // offset to absorb that overhang while keeping the apex→base axial
+      // height equal to `height` and the bbox centered on `center` (F6-FR4):
+      //   apex      = center − (0, (height + ry)/2)
+      //   baseCenter = center + (0, (height − ry)/2)
+      const rx = params.radiusX;
+      const ry = (rx * params.capRatio) / 100;
+      const apex: Point = {x: center.x, y: center.y - (params.height + ry) / 2};
+      const baseC: Point = {x: center.x, y: center.y + (params.height - ry) / 2};
+      const BASE_SEGMENTS = 16;
+      // Front half of the base: left (π) → right (0) through +y (front).
+      // The arc endpoints are the left/right base extremes the slant seams
+      // attach to, so no separate seam vertices are needed. The closing
+      // apex→apex seam is zero-length and harmless (EC5).
+      const baseFront = ellipseArcPoints(baseC, rx, ry, Math.PI, 0, BASE_SEGMENTS);
+      return makePolygon([apex, ...baseFront, apex], style);
+    },
+  },
+
   // ---------------------------------------------------------------------------
   // v1.0.4 — Arrows
   // ---------------------------------------------------------------------------
