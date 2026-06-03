@@ -378,6 +378,55 @@ describe('cuboid / cube (oblique box family)', () => {
   });
 });
 
+describe('squarePyramid', () => {
+  it('builds one closed GEO_polygon (F4-AC1)', () => {
+    const geo = buildShape('squarePyramid');
+    assertPolygon(geo);
+    expect(geo.points[0]).toEqual(geo.points[geo.points.length - 1]);
+    expect(geo.points.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('apex lies above all base vertices by ~height (F4-AC2)', () => {
+    const geo = buildShape('squarePyramid');
+    assertPolygon(geo);
+    // Walk order: [BL, BR, BR', BL', A, ...]; apex A is index 4, the four
+    // base corners are indices 0..3.
+    const p = geo.points;
+    const apex = p[4];
+    const base = [p[0], p[1], p[2], p[3]];
+    base.forEach(b => expect(apex.y).toBeLessThan(b.y));
+    const baseCy = base.reduce((s, q) => s + q.y, 0) / base.length;
+    expect(baseCy - apex.y).toBeCloseTo(160, 3); // default height
+  });
+
+  it('has exactly the 7 visible edges with 2 retraces, hidden BR-A absent (F4-AC4)', () => {
+    const geo = buildShape('squarePyramid');
+    assertPolygon(geo);
+    const counts = edgeCounts(geo.points);
+    // 4 base + 3 visible slant = 7 distinct edges.
+    expect(counts.size).toBe(7);
+    const p = geo.points;
+    const BL = p[0];
+    const BR = p[1];
+    const BRb = p[2];
+    const BLb = p[3];
+    const A = p[4];
+    // Retraced: back-left slant BL'-A (spur) and the front base edge BL-BR
+    // (closing seam).
+    expect(retracedEdges(geo.points)).toEqual([edgeKey(BLb, A), edgeKey(BL, BR)].sort());
+    // The back-right slant BR'-A is hidden — must not be drawn.
+    expect(counts.has(edgeKey(BRb, A))).toBe(false);
+  });
+
+  it('is bounding-box centered on center (INV6)', () => {
+    const geo = buildShape('squarePyramid');
+    assertPolygon(geo);
+    const b = bbox(geo.points);
+    expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 4);
+    expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 4);
+  });
+});
+
 describe('SHAPES', () => {
   it('each shape has a unique id', () => {
     const ids = SHAPES.map(s => s.id);

@@ -859,6 +859,24 @@ export const SHAPES: readonly Shape[] = [
       ),
   },
 
+  {
+    id: 'squarePyramid',
+    label: 'Square Pyramid',
+    category: 'threeD',
+    geometryType: 'GEO_polygon',
+    parameters: [
+      {id: 'baseWidth', label: 'Base (px)', defaultValue: 180, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 160, min: 1, unit: 'px'},
+      {id: 'depth', label: 'Depth (px)', defaultValue: 80, min: 1, unit: 'px'},
+      {id: 'angle', label: 'Angle (deg)', defaultValue: 30, min: 0, max: 60, unit: 'deg'},
+    ],
+    build: (center, params, style) =>
+      makePolygon(
+        buildPyramidPoints(center, params.baseWidth, params.height, params.depth, params.angle),
+        style,
+      ),
+  },
+
   // ---------------------------------------------------------------------------
   // v1.0.4 — Arrows
   // ---------------------------------------------------------------------------
