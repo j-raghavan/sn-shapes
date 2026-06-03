@@ -22,6 +22,11 @@ import {
   toggleFavorite,
   MAX_FAVORITES,
   nextCategory,
+  arcPoints,
+  ellipseArcPoints,
+  obliqueDepth,
+  buildBoxPoints,
+  buildPyramidPoints,
 } from '../src/shapes';
 
 const CENTER: Point = {x: 100, y: 100};
@@ -130,6 +135,129 @@ describe('roundedRectPoints', () => {
       expect(p.y).toBeGreaterThanOrEqual(CENTER.y - hh - 0.01);
       expect(p.y).toBeLessThanOrEqual(CENTER.y + hh + 0.01);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pseudo-3D solids — shared test utilities (v1.1.0)
+// ---------------------------------------------------------------------------
+
+function bbox(points: Point[]) {
+  const xs = points.map(p => p.x);
+  const ys = points.map(p => p.y);
+  return {
+    minX: Math.min(...xs),
+    maxX: Math.max(...xs),
+    minY: Math.min(...ys),
+    maxY: Math.max(...ys),
+  };
+}
+
+describe('ellipseArcPoints', () => {
+  it('returns segments + 1 points', () => {
+    expect(ellipseArcPoints(CENTER, 40, 20, 0, Math.PI, 12)).toHaveLength(13);
+  });
+
+  it('places points on the ellipse (rx, ry) about center', () => {
+    const rx = 60;
+    const ry = 25;
+    const pts = ellipseArcPoints(CENTER, rx, ry, 0, 2 * Math.PI, 24);
+    pts.forEach(p => {
+      const nx = (p.x - CENTER.x) / rx;
+      const ny = (p.y - CENTER.y) / ry;
+      expect(nx * nx + ny * ny).toBeCloseTo(1, 5);
+    });
+  });
+
+  it('equals arcPoints when rx === ry (parity, F2-AC3)', () => {
+    const r = 50;
+    const ell = ellipseArcPoints(CENTER, r, r, 0.3, 2 * Math.PI - 0.3, 16);
+    const arc = arcPoints(CENTER, r, 0.3, 2 * Math.PI - 0.3, 16);
+    expect(ell).toHaveLength(arc.length);
+    ell.forEach((p, i) => {
+      expect(p.x).toBeCloseTo(arc[i].x, 9);
+      expect(p.y).toBeCloseTo(arc[i].y, 9);
+    });
+  });
+
+  it('throws when segments < 1', () => {
+    expect(() => ellipseArcPoints(CENTER, 10, 5, 0, 1, 0)).toThrow();
+  });
+});
+
+describe('obliqueDepth', () => {
+  it('points up-and-right for a positive angle (F2-AC2)', () => {
+    const d = obliqueDepth(100, 30);
+    expect(d.dx).toBeGreaterThan(0);
+    expect(d.dy).toBeLessThan(0);
+  });
+
+  it('has magnitude depth * depthScale (F2-AC2)', () => {
+    const depth = 100;
+    const d = obliqueDepth(depth, 30);
+    const mag = Math.sqrt(d.dx * d.dx + d.dy * d.dy);
+    // depthScale === 0.7 (module constant).
+    expect(mag).toBeCloseTo(depth * 0.7, 6);
+  });
+
+  it('magnitude is independent of angle', () => {
+    const a = obliqueDepth(120, 10);
+    const b = obliqueDepth(120, 50);
+    const magA = Math.sqrt(a.dx * a.dx + a.dy * a.dy);
+    const magB = Math.sqrt(b.dx * b.dx + b.dy * b.dy);
+    expect(magA).toBeCloseTo(magB, 6);
+  });
+
+  it('collapses to (depthScale*depth, 0) at angle 0', () => {
+    const d = obliqueDepth(100, 0);
+    expect(d.dx).toBeCloseTo(70, 6);
+    expect(d.dy).toBeCloseTo(0, 6);
+  });
+});
+
+describe('buildBoxPoints', () => {
+  it('returns the documented 12-vertex Eulerian walk', () => {
+    expect(buildBoxPoints(CENTER, 100, 80, 60, 30)).toHaveLength(12);
+  });
+
+  it('back vertices equal front vertices plus D', () => {
+    const d = obliqueDepth(60, 30);
+    const pts = buildBoxPoints(CENTER, 100, 80, 60, 30);
+    // Walk index 0 = TL (front), index 5 = TL' (back).
+    const TL = pts[0];
+    const TLb = pts[5];
+    expect(TLb.x - TL.x).toBeCloseTo(d.dx, 6);
+    expect(TLb.y - TL.y).toBeCloseTo(d.dy, 6);
+  });
+
+  it('is bounding-box centered on center (INV6)', () => {
+    const pts = buildBoxPoints(CENTER, 100, 80, 60, 30);
+    const b = bbox(pts);
+    expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 6);
+    expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 6);
+  });
+});
+
+describe('buildPyramidPoints', () => {
+  it('returns the documented 9-vertex Eulerian walk', () => {
+    expect(buildPyramidPoints(CENTER, 100, 90, 60, 30)).toHaveLength(9);
+  });
+
+  it('apex is above all base vertices by ~height', () => {
+    const height = 90;
+    const pts = buildPyramidPoints(CENTER, 100, height, 60, 30);
+    const apex = pts[4]; // index 4 = A in the documented walk
+    const base = [pts[0], pts[1], pts[2], pts[3]];
+    base.forEach(b => expect(apex.y).toBeLessThan(b.y));
+    const baseCy = base.reduce((s, p) => s + p.y, 0) / base.length;
+    expect(baseCy - apex.y).toBeCloseTo(height, 6);
+  });
+
+  it('is bounding-box centered on center (INV6)', () => {
+    const pts = buildPyramidPoints(CENTER, 100, 90, 60, 30);
+    const b = bbox(pts);
+    expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 6);
+    expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 6);
   });
 });
 

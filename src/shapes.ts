@@ -122,6 +122,11 @@ export type ShapeCategory =
   // it without scrolling forward through every other category.
   | 'favorites'
   | 'basic'
+  // 'threeD' is the pseudo-3D solids group (cuboid, cube, square
+  // pyramid, cylinder, cone) — each a single GEO_polygon in oblique
+  // (cabinet) projection. Placed immediately after 'basic' so the
+  // solids sit next to the primitives they extend (OQ1, resolved).
+  | 'threeD'
   | 'arrows'
   | 'flowchart'
   | 'decorative'
@@ -130,6 +135,7 @@ export type ShapeCategory =
 export const CATEGORY_ORDER: readonly ShapeCategory[] = [
   'favorites',
   'basic',
+  'threeD',
   'arrows',
   'flowchart',
   'decorative',
@@ -139,6 +145,7 @@ export const CATEGORY_ORDER: readonly ShapeCategory[] = [
 export const CATEGORY_LABELS: Record<ShapeCategory, string> = {
   favorites: '♡ Favorites',
   basic: 'Basic Shapes',
+  threeD: '3D Shapes',
   arrows: 'Arrows',
   flowchart: 'Flowchart',
   decorative: 'Decorative',
@@ -338,7 +345,7 @@ function makeLine(p1: Point, p2: Point, style: PenStyle): LineGeometry {
  * shapes that trace the majority of a circle's outline (ballArrow,
  * refreshArrow) and need to go the far side of the disc.
  */
-function arcPoints(
+export function arcPoints(
   center: Point,
   radius: number,
   startAngle: number,
@@ -352,6 +359,36 @@ function arcPoints(
     return {
       x: center.x + radius * Math.cos(angle),
       y: center.y + radius * Math.sin(angle),
+    };
+  });
+}
+
+/**
+ * Sample a point list along an elliptical arc — the y-scaled analogue of
+ * `arcPoints`. The firmware has no native arc primitive, so the
+ * foreshortened circular caps of the 3D solids (cylinder / cone) have to
+ * be expressed as polygon vertices on an ellipse with `rx !== ry`.
+ *
+ * Identical angle convention to `arcPoints` (0 = +x, π/2 = +y in screen
+ * coords; start/end need not be normalised) and the same
+ * `segments + 1` point count. With `rx === ry` the output is identical to
+ * `arcPoints(center, rx, …)` (F2-AC3 parity).
+ */
+export function ellipseArcPoints(
+  center: Point,
+  rx: number,
+  ry: number,
+  startAngle: number,
+  endAngle: number,
+  segments: number,
+): Point[] {
+  if (segments < 1) {throw new Error(`arc needs at least 1 segment, got ${segments}`);}
+  return Array.from({length: segments + 1}, (_, i) => {
+    const t = i / segments;
+    const angle = startAngle + (endAngle - startAngle) * t;
+    return {
+      x: center.x + rx * Math.cos(angle),
+      y: center.y + ry * Math.sin(angle),
     };
   });
 }
@@ -414,6 +451,140 @@ function buildBlockArrowPoints(center: Point, params: Record<string, number>): P
     {x: shaftEnd,       y: center.y + sh},
     {x: center.x - hl,  y: center.y + sh},
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Pseudo-3D solids — oblique (cabinet) projection helpers (v1.1.0)
+// ---------------------------------------------------------------------------
+// Each 3D solid (cuboid, cube, square pyramid, cylinder, cone) is a single
+// closed GEO_polygon traced as one continuous pen stroke (an Eulerian-style
+// wireframe walk that retraces the minimum number of edges). This keeps the
+// firmware's single-element lasso, pen colour, width and rotation all working
+// — the capabilities the v1.0.4 image-fallback 3D shapes lost.
+//
+// Oblique (cabinet) projection: the front face is drawn axis-aligned, and
+// depth is a parallel offset vector D at angle θ (default 30°), foreshortened
+// by DEPTH_SCALE so the solids read clearly at the 48-px palette size.
+
+/**
+ * Cabinet-projection foreshortening factor for the depth axis. 0.7 is the
+ * conventional cabinet value — enough depth to read as 3D without the back
+ * face crowding the front at thumbnail scale.
+ */
+const DEPTH_SCALE = 0.7;
+
+/**
+ * Depth vector D for oblique projection: a back-face vertex equals its
+ * front-face vertex plus D. In screen coords (−y is up) a positive angle
+ * sends depth up-and-to-the-right, so `dx > 0` and `dy < 0` for the default
+ * 30°. Magnitude is `depth · DEPTH_SCALE` (independent of angle).
+ */
+export function obliqueDepth(depth: number, angleDeg: number): {dx: number; dy: number} {
+  const rad = (angleDeg * Math.PI) / 180;
+  const d = depth * DEPTH_SCALE;
+  return {dx: d * Math.cos(rad), dy: -d * Math.sin(rad)};
+}
+
+/**
+ * Translate a vertex list so its bounding box is centered on `center`. Used
+ * by the 3D builders so an oblique solid is *visually* centered (INV6) even
+ * though its raw vertex centroid is offset by ~D/2 — the firmware lasso and
+ * the page-centered insert both key off the visible bounds, not the centroid.
+ */
+function centerOnBbox(points: Point[], center: Point): Point[] {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) {minX = p.x;}
+    if (p.x > maxX) {maxX = p.x;}
+    if (p.y < minY) {minY = p.y;}
+    if (p.y > maxY) {maxY = p.y;}
+  }
+  const ox = center.x - (minX + maxX) / 2;
+  const oy = center.y - (minY + maxY) / 2;
+  return points.map(p => ({x: p.x + ox, y: p.y + oy}));
+}
+
+/**
+ * Ordered single-path vertex list for the visible box wireframe (front +
+ * top + right faces), shared by cuboid and cube. The front face is offset by
+ * −D/2 and the back by +D/2 so the solid's bounding box straddles `center`
+ * (INV6 / F3-FR5), even though the raw vertex centroid is not at `center`.
+ *
+ * The visible wireframe has 9 edges over 7 drawn corners with four odd-degree
+ * corners, so a single closed stroke must retrace exactly 3 edges. The walk
+ * below is a verified Eulerian circuit; it ends at TR so `makePolygon`'s
+ * closing seam is the real edge TR→TL (never a face diagonal):
+ *
+ *   [TL, TR, BR, BR', TR', TL', TL, BL, BR, BR', TR', TR]
+ *   retraced: TL-TR (close), BR-BR', BR'-TR'  (invisible on e-ink)
+ *
+ * BL' (back-bottom-left) is hidden and never drawn.
+ */
+export function buildBoxPoints(
+  center: Point,
+  w: number,
+  h: number,
+  depth: number,
+  angleDeg: number,
+): Point[] {
+  const hw = w / 2;
+  const hh = h / 2;
+  const {dx, dy} = obliqueDepth(depth, angleDeg);
+  // Build the front face about a provisional origin; the back face is the
+  // front face + D. centerOnBbox then makes the whole solid bbox-centered on
+  // `center` (INV6 / F3-FR5) — exact regardless of depth/angle skew.
+  const TL: Point = {x: -hw, y: -hh};
+  const TR: Point = {x: hw, y: -hh};
+  const BR: Point = {x: hw, y: hh};
+  const BL: Point = {x: -hw, y: hh};
+  const TLb: Point = {x: TL.x + dx, y: TL.y + dy};
+  const TRb: Point = {x: TR.x + dx, y: TR.y + dy};
+  const BRb: Point = {x: BR.x + dx, y: BR.y + dy};
+  const walk = [TL, TR, BR, BRb, TRb, TLb, TL, BL, BR, BRb, TRb, TR];
+  return centerOnBbox(walk, center);
+}
+
+/**
+ * Ordered single-path vertex list for the square-pyramid wireframe (base
+ * rhombus + three visible slant edges), used by squarePyramid. The base is
+ * offset so the solid's bounding box is centered on `center` (INV6), and the
+ * apex sits above the base centroid offset by D/2.
+ *
+ * The visible wireframe has 7 edges (4 base + 3 slant); the back-right slant
+ * BR'→A is hidden. Four odd-degree vertices mean a single closed stroke
+ * retraces exactly 2 edges — the back-left slant as an out-and-back spur and
+ * the front base edge as the closing seam. Verified Eulerian circuit:
+ *
+ *   [BL, BR, BR', BL', A, BL', BL, A, BR]
+ *   retraced: BL'-A (spur) and BL-BR (close)
+ */
+export function buildPyramidPoints(
+  center: Point,
+  baseWidth: number,
+  height: number,
+  depth: number,
+  angleDeg: number,
+): Point[] {
+  const hw = baseWidth / 2;
+  const {dx, dy} = obliqueDepth(depth, angleDeg);
+  // Build the wireframe at a provisional origin, then translate so its
+  // bounding box is centered on `center` (INV6). The oblique depth offset
+  // skews the bbox in both axes and the apex extends it upward, so a closed-
+  // form centre offset is fiddle-prone — centring the finished bbox is exact
+  // and self-documenting.
+  const BL: Point = {x: -hw, y: 0};
+  const BR: Point = {x: hw, y: 0};
+  const BLb: Point = {x: BL.x + dx, y: BL.y + dy};
+  const BRb: Point = {x: BR.x + dx, y: BR.y + dy};
+  // Apex above the base centroid, lifted by the full apex height.
+  const cx = (BL.x + BR.x + BLb.x + BRb.x) / 4;
+  const cy = (BL.y + BR.y + BLb.y + BRb.y) / 4;
+  const A: Point = {x: cx, y: cy - height};
+  const walk = [BL, BR, BRb, BLb, A, BLb, BL, A, BR];
+  return centerOnBbox(walk, center);
 }
 
 export const SHAPES: readonly Shape[] = [

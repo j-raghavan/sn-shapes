@@ -393,17 +393,21 @@ describe('ShapePalette (merged popup)', () => {
     // 'favorites' is excluded from the walk: its membership is
     // user-driven (no static representative) and the insert path is
     // identical to whichever shape happens to be favorited.
-    const staticCategories = CATEGORY_ORDER.filter(c => c !== 'favorites');
+    // Walk every NON-EMPTY static category (favorites excluded — its
+    // membership is user-driven). A static category may legitimately be
+    // empty during a phased rollout (e.g. the 'threeD' group exists in
+    // CATEGORY_ORDER before its shapes land), so we skip empties rather
+    // than dereference a missing representative; the carousel itself does
+    // not skip empty groups, so navigation distance is measured against
+    // the full CATEGORY_ORDER position.
     const tree = await mountPalette();
-    const representatives: ShapeId[] = staticCategories.map(c =>
-      shapesInCategory(c)[0].id,
-    );
-    // Carousel landing is 'basic' (index 1 of CATEGORY_ORDER); the
-    // representatives list is in CATEGORY_ORDER minus favorites, so
-    // staticCategories[0] === 'basic' and we don't need to walk for it.
-    for (let i = 0; i < representatives.length; i++) {
-      const id = representatives[i];
-      for (let j = 0; j < i; j++) {
+    const LANDING = 'basic';
+    const landingIdx = CATEGORY_ORDER.indexOf(LANDING);
+    const targets = CATEGORY_ORDER.map((c, idx) => ({c, idx}))
+      .filter(({c}) => c !== 'favorites' && shapesInCategory(c).length > 0)
+      .map(({c, idx}) => ({id: shapesInCategory(c)[0].id, steps: idx - landingIdx}));
+    for (const {id, steps} of targets) {
+      for (let j = 0; j < steps; j++) {
         await act(async () => {
           findByTestID(tree, TEST_IDS.groupNext).props.onPress();
           await flushPromises();
@@ -411,16 +415,14 @@ describe('ShapePalette (merged popup)', () => {
       }
       await selectShape(tree, id);
       await pressInsert(tree);
-      for (let j = 0; j < i; j++) {
+      for (let j = 0; j < steps; j++) {
         await act(async () => {
           findByTestID(tree, TEST_IDS.groupPrev).props.onPress();
           await flushPromises();
         });
       }
     }
-    expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(
-      representatives.length,
-    );
+    expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(targets.length);
   });
 
   // -------------------------------------------------------------------------
