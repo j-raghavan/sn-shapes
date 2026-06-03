@@ -70,6 +70,17 @@ yarn-error.log
 ph*.md
 phase*.md
 
+# Agent / local config (not committed)
+CLAUDE.md
+.claude/
+.claude-flow/
+.mcp.json
+.swarm/
+ruvector.db
+
+# Local specs / planning docs (not committed)
+spec/
+
 # Yarn
 .yarn/*
 !.yarn/patches
