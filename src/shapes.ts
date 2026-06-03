@@ -903,14 +903,16 @@ export const SHAPES: readonly Shape[] = [
       const TOP_SEGMENTS = 32;
       const BOT_SEGMENTS = 16;
       const FULL_TURN = 2 * Math.PI;
-      const leftBottom: Point = {x: botC.x - rx, y: botC.y};
       const rightTop: Point = {x: topC.x + rx, y: topC.y};
       // Top rim: full ellipse starting and ending at the left point (π → π + a
       // full turn).
       const topRim = ellipseArcPoints(topC, rx, ry, Math.PI, Math.PI + FULL_TURN, TOP_SEGMENTS);
-      // Bottom rim: front half only (left π → right 0, through +y front).
+      // Bottom rim: front half only (left π → right 0, through +y front). Its
+      // first point (π) IS the bottom-left vertex, so it doubles as the left
+      // seam's lower endpoint — no separate vertex needed (mirrors the cone,
+      // whose arc endpoints serve as the slant-seam attachments).
       const botFront = ellipseArcPoints(botC, rx, ry, Math.PI, 0, BOT_SEGMENTS);
-      return makePolygon([...topRim, leftBottom, ...botFront, rightTop], style);
+      return makePolygon([...topRim, ...botFront, rightTop], style);
     },
   },
 
