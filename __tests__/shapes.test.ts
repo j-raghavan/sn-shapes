@@ -490,10 +490,11 @@ describe('cone', () => {
     const base = geo.points.slice(1, geo.points.length - 2);
     // Apex is strictly above every base vertex.
     base.forEach(p => expect(apex.y).toBeLessThan(p.y));
-    // Axial height: apex to the base centerline (baseCenter.y). The base
-    // left/right extremes sit on that centerline (angle π and 0, sin 0).
-    const baseCenterY = Math.min(...base.map(p => p.y)); // base endpoints
-    expect(baseCenterY - apex.y).toBeCloseTo(200, 3); // default height
+    // Axial height: apex to the base centerline. The base front arc starts at
+    // the left extreme (angle π), which sits exactly on baseCenter.y (sin 0),
+    // so base[0] is the centerline reference vertex.
+    const leftBaseExtreme = base[0];
+    expect(leftBaseExtreme.y - apex.y).toBeCloseTo(200, 3); // default height
   });
 
   it('retraces no edge, excluding the zero-length apex close (F6-AC4)', () => {

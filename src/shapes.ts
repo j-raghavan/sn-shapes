@@ -358,15 +358,9 @@ export function arcPoints(
   endAngle: number,
   segments: number,
 ): Point[] {
-  if (segments < 1) {throw new Error(`arc needs at least 1 segment, got ${segments}`);}
-  return Array.from({length: segments + 1}, (_, i) => {
-    const t = i / segments;
-    const angle = startAngle + (endAngle - startAngle) * t;
-    return {
-      x: center.x + radius * Math.cos(angle),
-      y: center.y + radius * Math.sin(angle),
-    };
-  });
+  // A circular arc is the equal-radii case of an elliptical one; delegate so
+  // the sampling logic (and the segments guard) lives in one place.
+  return ellipseArcPoints(center, radius, radius, startAngle, endAngle, segments);
 }
 
 /**
@@ -903,14 +897,17 @@ export const SHAPES: readonly Shape[] = [
       const ry = (rx * params.capRatio) / 100;
       const topC: Point = {x: center.x, y: center.y - params.height / 2};
       const botC: Point = {x: center.x, y: center.y + params.height / 2};
-      // ≥24 segments on the full top rim keeps it smooth at icon + page
-      // scale, mirroring how the arrow arcs size their sampling.
+      // 32 segments on the full top rim keeps it smooth at icon + page
+      // scale (the front bottom half-rim needs roughly half that), mirroring
+      // how the arrow arcs size their sampling.
       const TOP_SEGMENTS = 32;
       const BOT_SEGMENTS = 16;
+      const FULL_TURN = 2 * Math.PI;
       const leftBottom: Point = {x: botC.x - rx, y: botC.y};
       const rightTop: Point = {x: topC.x + rx, y: topC.y};
-      // Top rim: full ellipse starting and ending at the left point (π).
-      const topRim = ellipseArcPoints(topC, rx, ry, Math.PI, Math.PI + 2 * Math.PI, TOP_SEGMENTS);
+      // Top rim: full ellipse starting and ending at the left point (π → π + a
+      // full turn).
+      const topRim = ellipseArcPoints(topC, rx, ry, Math.PI, Math.PI + FULL_TURN, TOP_SEGMENTS);
       // Bottom rim: front half only (left π → right 0, through +y front).
       const botFront = ellipseArcPoints(botC, rx, ry, Math.PI, 0, BOT_SEGMENTS);
       return makePolygon([...topRim, leftBottom, ...botFront, rightTop], style);
