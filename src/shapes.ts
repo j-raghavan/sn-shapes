@@ -100,7 +100,13 @@ export type ShapeId =
   // Others (v1.0.4) — the misc bucket.
   | 'plus'
   | 'lightning'
-  | 'trapezoid';
+  | 'trapezoid'
+  // 3D solids (v0.4) — oblique single-polygon wireframes
+  | 'cuboid'
+  | 'cube'
+  | 'squarePyramid'
+  | 'cylinder'
+  | 'cone';
 
 /**
  * Shape groups surfaced in the palette's carousel header. The palette
