@@ -664,6 +664,31 @@ describe('cone (full base ellipse + 2 slants, no chord, v0.5)', () => {
     expect(edgesTouchingApex(geo.points, apex)).toBe(2);
   });
 
+  it('pins distinct-edge count and the front-arc retrace (F6-AC4 updated)', () => {
+    const geo = buildShape('cone');
+    assertPolygon(geo);
+    const counts = edgeCounts(geo.points);
+    // Distinct edges: 2 slants + back arc (BASE_SEGMENTS) + front arc
+    // (BASE_SEGMENTS) = 2 + 16 + 16 = 34 at the builder's 16-segment caps.
+    // Pin against the live value so a wrong walk (e.g. retracing the back
+    // arc, or a half/partial base) shifts the count and fails here.
+    const BASE_SEGMENTS = 16; // mirrors the cone builder's HALF_SEGMENTS
+    expect(counts.size).toBe(2 + 2 * BASE_SEGMENTS);
+    // "1 retraced arc" = the front arc drawn twice = BASE_SEGMENTS edges
+    // (NOT 1). Exactly the front arc is doubled; nothing else.
+    const retraced = retracedEdges(geo.points);
+    expect(retraced).toHaveLength(BASE_SEGMENTS);
+    // Every retraced edge lies on the base FRONT arc (its midpoint is below
+    // the base centerline, Δy > baseC.y). A back-arc retrace would fail this.
+    const baseCenterY = baseC().y;
+    retraced.forEach(key => {
+      const [a, b] = key.split('|');
+      const ay = Number(a.split(',')[1]);
+      const by = Number(b.split(',')[1]);
+      expect((ay + by) / 2).toBeGreaterThan(baseCenterY);
+    });
+  });
+
   it('fills a bbox centered on center with the correct extents (F6-AC1)', () => {
     const geo = buildShape('cone');
     assertPolygon(geo);
