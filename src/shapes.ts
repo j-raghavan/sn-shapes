@@ -815,6 +815,51 @@ export const SHAPES: readonly Shape[] = [
   })),
 
   // ---------------------------------------------------------------------------
+  // v1.1.0 — 3D Shapes (pseudo-3D solids, oblique projection)
+  // ---------------------------------------------------------------------------
+  // Each solid is a single closed GEO_polygon traced as one continuous pen
+  // stroke (see the oblique-projection helper block above). This restores the
+  // 3D shapes dropped in v1.0.4 the right way: as real geometries the firmware
+  // can lasso as one element and re-style with pen colour / width / rotation,
+  // rather than the baked-bitmap fallback that lost all of that.
+  {
+    id: 'cuboid',
+    label: 'Cuboid',
+    category: 'threeD',
+    geometryType: 'GEO_polygon',
+    parameters: [
+      {id: 'width', label: 'Width (px)', defaultValue: 200, min: 1, unit: 'px'},
+      {id: 'height', label: 'Height (px)', defaultValue: 150, min: 1, unit: 'px'},
+      {id: 'depth', label: 'Depth (px)', defaultValue: 80, min: 1, unit: 'px'},
+      {id: 'angle', label: 'Angle (deg)', defaultValue: 30, min: 0, max: 60, unit: 'deg'},
+    ],
+    build: (center, params, style) =>
+      makePolygon(
+        buildBoxPoints(center, params.width, params.height, params.depth, params.angle),
+        style,
+      ),
+  },
+
+  {
+    id: 'cube',
+    label: 'Cube',
+    category: 'threeD',
+    geometryType: 'GEO_polygon',
+    parameters: [
+      // A cube is the box builder with width = height = depth, exposed as a
+      // single `size` preset so the user doesn't have to keep three sliders
+      // in lockstep (same builder-sharing pattern as blockArrow/thickArrow).
+      {id: 'size', label: 'Size (px)', defaultValue: 180, min: 1, unit: 'px'},
+      {id: 'angle', label: 'Angle (deg)', defaultValue: 30, min: 0, max: 60, unit: 'deg'},
+    ],
+    build: (center, params, style) =>
+      makePolygon(
+        buildBoxPoints(center, params.size, params.size, params.size, params.angle),
+        style,
+      ),
+  },
+
+  // ---------------------------------------------------------------------------
   // v1.0.4 — Arrows
   // ---------------------------------------------------------------------------
   // 3D wireframes (cube / cylinder / cone / pyramid / sphere / hemisphere

@@ -176,6 +176,9 @@ export const SHAPE_ICONS: Record<ShapeId, ImageSourcePropType> = {
   octagon: require('../assets/shapes/shape_octagon.png'),
   line: require('../assets/shapes/shape_line.png'),
   parallelogram: require('../assets/shapes/shape_parallelogram.png'),
+  // 3D
+  cuboid: require('../assets/shapes/shape_cuboid.png'),
+  cube: require('../assets/shapes/shape_cube.png'),
   // Arrows
   blockArrow: require('../assets/shapes/shape_blockArrow.png'),
   doubleArrow: require('../assets/shapes/shape_doubleArrow.png'),

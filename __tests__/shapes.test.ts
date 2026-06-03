@@ -153,6 +153,46 @@ function bbox(points: Point[]) {
   };
 }
 
+/**
+ * Key an undirected edge by its sorted, integer-rounded endpoint pair so
+ * float noise (depth-vector arithmetic) doesn't spuriously split one edge
+ * into two. Rounding to whole px is well within the solids' vertex spacing.
+ */
+function edgeKey(a: Point, b: Point): string {
+  const ka = `${Math.round(a.x)},${Math.round(a.y)}`;
+  const kb = `${Math.round(b.x)},${Math.round(b.y)}`;
+  return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+}
+
+/**
+ * Undirected edge multiset of a closed polygon, from its consecutive
+ * vertices (the build() point list already has first === last, so iterating
+ * consecutive pairs covers the makePolygon closing seam). Zero-length edges
+ * — coincident consecutive points, e.g. the cone's apex→apex close (EC5) —
+ * are dropped as harmless artefacts.
+ */
+function edgeCounts(points: Point[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (let i = 0; i + 1 < points.length; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (Math.round(a.x) === Math.round(b.x) && Math.round(a.y) === Math.round(b.y)) {
+      continue; // zero-length seam
+    }
+    const k = edgeKey(a, b);
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Sorted list of edges traversed more than once (retraced). */
+function retracedEdges(points: Point[]): string[] {
+  return [...edgeCounts(points).entries()]
+    .filter(([, n]) => n > 1)
+    .map(([k]) => k)
+    .sort();
+}
+
 describe('ellipseArcPoints', () => {
   it('returns segments + 1 points', () => {
     expect(ellipseArcPoints(CENTER, 40, 20, 0, Math.PI, 12)).toHaveLength(13);
@@ -258,6 +298,83 @@ describe('buildPyramidPoints', () => {
     const b = bbox(pts);
     expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 6);
     expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 6);
+  });
+});
+
+describe('cuboid / cube (oblique box family)', () => {
+  it('cuboid builds one closed GEO_polygon (F3-AC1)', () => {
+    const geo = buildShape('cuboid');
+    assertPolygon(geo);
+    expect(geo.points[0]).toEqual(geo.points[geo.points.length - 1]);
+    expect(geo.points.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('back vertices equal front vertices plus D (F3-AC2)', () => {
+    const geo = buildShape('cuboid');
+    assertPolygon(geo);
+    // Walk order: [TL, TR, BR, BR', TR', TL', TL, ...]. Front TL/TR/BR are
+    // indices 0/1/2; their back counterparts TL'/TR'/BR' are 5/4/3.
+    const d = obliqueDepth(80, 30); // cuboid default depth/angle
+    const pairs: Array<[number, number]> = [
+      [0, 5],
+      [1, 4],
+      [2, 3],
+    ];
+    pairs.forEach(([f, b]) => {
+      expect(geo.points[b].x - geo.points[f].x).toBeCloseTo(d.dx, 4);
+      expect(geo.points[b].y - geo.points[f].y).toBeCloseTo(d.dy, 4);
+    });
+  });
+
+  it('has exactly the 9 visible edges with 3 retraces and no diagonal (F3-AC6)', () => {
+    const geo = buildShape('cuboid');
+    assertPolygon(geo);
+    const counts = edgeCounts(geo.points);
+    // 9 distinct visible front/top/right edges.
+    expect(counts.size).toBe(9);
+    // Exactly three edges traversed twice: TL-TR, BR-BR', BR'-TR'.
+    const p = geo.points;
+    const TL = p[0];
+    const TR = p[1];
+    const BRb = p[3];
+    const TRb = p[4];
+    const BR = p[2];
+    const expectedRetraced = [
+      edgeKey(TL, TR),
+      edgeKey(BR, BRb),
+      edgeKey(BRb, TRb),
+    ].sort();
+    expect(retracedEdges(geo.points)).toEqual(expectedRetraced);
+    // No face diagonal: the close must be the real edge TR→TL, never a
+    // diagonal such as TR-TL' or TR-BL.
+    const BL = p[7];
+    const TLb = p[5];
+    expect(counts.has(edgeKey(TR, TLb))).toBe(false);
+    expect(counts.has(edgeKey(TR, BL))).toBe(false);
+  });
+
+  it('cube builds width == height == depth (F3-AC3)', () => {
+    const geo = buildShape('cube');
+    assertPolygon(geo);
+    expect(geo.points[0]).toEqual(geo.points[geo.points.length - 1]);
+    // Front face square: |TL-TR| (width) == |TR-BR| (height). Depth edge
+    // |BR-BR'| == |D| == size*depthScale; with size==width and the same
+    // builder, the box is a cube.
+    const p = geo.points;
+    const width = Math.hypot(p[1].x - p[0].x, p[1].y - p[0].y);
+    const height = Math.hypot(p[2].x - p[1].x, p[2].y - p[1].y);
+    expect(width).toBeCloseTo(height, 4);
+    expect(width).toBeCloseTo(180, 4); // default size
+    const depthEdge = Math.hypot(p[3].x - p[2].x, p[3].y - p[2].y);
+    expect(depthEdge).toBeCloseTo(180 * 0.7, 4); // size * depthScale
+  });
+
+  it('cuboid is bounding-box centered on center (INV6)', () => {
+    const geo = buildShape('cuboid');
+    assertPolygon(geo);
+    const b = bbox(geo.points);
+    expect((b.minX + b.maxX) / 2).toBeCloseTo(CENTER.x, 4);
+    expect((b.minY + b.maxY) / 2).toBeCloseTo(CENTER.y, 4);
   });
 });
 
