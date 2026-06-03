@@ -2,8 +2,8 @@
   "name": "Shapes",
   "desc": "Quickly add beautifully centered shapes to your notes: squares, circles, triangles, polygons, and more. Just tap a shape and it's placed right on the page for you.",
   "iconPath": "assets/icon.png",
-  "versionName": "1.0.5",
-  "versionCode": "10005",
+  "versionName": "1.0.6",
+  "versionCode": "10006",
   "pluginID": "ismudkearvzd5ffx",
   "pluginKey": "SnShapes",
   "jsMainPath": "index"
