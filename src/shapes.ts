@@ -508,20 +508,24 @@ function centerOnBbox(points: Point[], center: Point): Point[] {
 }
 
 /**
- * Ordered single-path vertex list for the visible box wireframe (front +
- * top + right faces), shared by cuboid and cube. The front face is offset by
- * −D/2 and the back by +D/2 so the solid's bounding box straddles `center`
- * (INV6 / F3-FR5), even though the raw vertex centroid is not at `center`.
+ * Ordered single-path vertex list for the FULL box wireframe (v0.5) — all 12
+ * cube edges (front 4 + back 4 + 4 depth connectors), shared by cuboid and
+ * cube. Drawn as a see-through wireframe (every edge, including the back face
+ * and the previously-hidden back-bottom-left vertex BLb) in one penColor; the
+ * firmware renders retracing single-polygon wireframes correctly (verified
+ * on-device).
  *
- * The visible wireframe has 9 edges over 7 drawn corners with four odd-degree
- * corners, so a single closed stroke must retrace exactly 3 edges. The walk
- * below is a verified Eulerian circuit; it ends at TR so `makePolygon`'s
- * closing seam is the real edge TR→TL (never a face diagonal):
+ * The wireframe graph has all-even degrees once the 4 connectors are doubled
+ * (a perfect matching), so the single closed stroke is an Eulerian circuit
+ * retracing exactly those 4 connectors. Verified walk (close TLb→TL is the
+ * connector TL-TLb, a real edge — never a face diagonal):
  *
- *   [TL, TR, BR, BR', TR', TL', TL, BL, BR, BR', TR', TR]
- *   retraced: TL-TR (close), BR-BR', BR'-TR'  (invisible on e-ink)
+ *   [TL, TR, BR, BL, TL, TLb, TRb, TR, TRb, BRb, BR, BRb, BLb, BL, BLb, TLb]
+ *   retraced: the 4 connectors TL-TLb, TR-TRb, BR-BRb, BL-BLb
  *
- * BL' (back-bottom-left) is hidden and never drawn.
+ * The front face is built about a provisional origin and the back face is the
+ * front face + D; centerOnBbox then makes the whole solid bbox-centered on
+ * `center` (INV6 / F3-FR5) — exact regardless of depth/angle skew.
  */
 export function buildBoxPoints(
   center: Point,
@@ -533,9 +537,6 @@ export function buildBoxPoints(
   const hw = w / 2;
   const hh = h / 2;
   const {dx, dy} = obliqueDepth(depth, angleDeg);
-  // Build the front face about a provisional origin; the back face is the
-  // front face + D. centerOnBbox then makes the whole solid bbox-centered on
-  // `center` (INV6 / F3-FR5) — exact regardless of depth/angle skew.
   const TL: Point = {x: -hw, y: -hh};
   const TR: Point = {x: hw, y: -hh};
   const BR: Point = {x: hw, y: hh};
@@ -543,23 +544,27 @@ export function buildBoxPoints(
   const TLb: Point = {x: TL.x + dx, y: TL.y + dy};
   const TRb: Point = {x: TR.x + dx, y: TR.y + dy};
   const BRb: Point = {x: BR.x + dx, y: BR.y + dy};
-  const walk = [TL, TR, BR, BRb, TRb, TLb, TL, BL, BR, BRb, TRb, TR];
+  const BLb: Point = {x: BL.x + dx, y: BL.y + dy};
+  const walk = [TL, TR, BR, BL, TL, TLb, TRb, TR, TRb, BRb, BR, BRb, BLb, BL, BLb, TLb];
   return centerOnBbox(walk, center);
 }
 
 /**
- * Ordered single-path vertex list for the square-pyramid wireframe (base
- * rhombus + three visible slant edges), used by squarePyramid. The base is
- * offset so the solid's bounding box is centered on `center` (INV6), and the
- * apex sits above the base centroid offset by D/2.
+ * Ordered single-path vertex list for the FULL square-pyramid wireframe
+ * (v0.5) — base rhombus (4) + ALL 4 slant edges to the apex (including the
+ * previously-hidden back-right slant BRb-A), used by squarePyramid. Drawn as
+ * a see-through wireframe in one penColor.
  *
- * The visible wireframe has 7 edges (4 base + 3 slant); the back-right slant
- * BR'→A is hidden. Four odd-degree vertices mean a single closed stroke
- * retraces exactly 2 edges — the back-left slant as an out-and-back spur and
- * the front base edge as the closing seam. Verified Eulerian circuit:
+ * Doubling 2 base edges evens all vertex degrees, so the single closed stroke
+ * is an Eulerian circuit retracing exactly those 2 base edges. Verified walk
+ * (close BLb→BL is the base edge BLb-BL, a real edge):
  *
- *   [BL, BR, BR', BL', A, BL', BL, A, BR]
- *   retraced: BL'-A (spur) and BL-BR (close)
+ *   [BL, A, BR, BL, BR, BRb, A, BLb, BRb, BLb]
+ *   retraced: base edges BL-BR and BRb-BLb
+ *
+ * The wireframe is built about a provisional origin (apex lifted `height`
+ * above the base centroid) and translated so its bounding box is centered on
+ * `center` (INV6) — exact regardless of the depth/angle skew.
  */
 export function buildPyramidPoints(
   center: Point,
@@ -570,11 +575,6 @@ export function buildPyramidPoints(
 ): Point[] {
   const hw = baseWidth / 2;
   const {dx, dy} = obliqueDepth(depth, angleDeg);
-  // Build the wireframe at a provisional origin, then translate so its
-  // bounding box is centered on `center` (INV6). The oblique depth offset
-  // skews the bbox in both axes and the apex extends it upward, so a closed-
-  // form centre offset is fiddle-prone — centring the finished bbox is exact
-  // and self-documenting.
   const BL: Point = {x: -hw, y: 0};
   const BR: Point = {x: hw, y: 0};
   const BLb: Point = {x: BL.x + dx, y: BL.y + dy};
@@ -583,7 +583,7 @@ export function buildPyramidPoints(
   const cx = (BL.x + BR.x + BLb.x + BRb.x) / 4;
   const cy = (BL.y + BR.y + BLb.y + BRb.y) / 4;
   const A: Point = {x: cx, y: cy - height};
-  const walk = [BL, BR, BRb, BLb, A, BLb, BL, A, BR];
+  const walk = [BL, A, BR, BL, BR, BRb, A, BLb, BRb, BLb];
   return centerOnBbox(walk, center);
 }
 
@@ -888,31 +888,44 @@ export const SHAPES: readonly Shape[] = [
       {id: 'capRatio', label: 'Cap (%)', defaultValue: 28, min: 10, max: 60, unit: '%'},
     ],
     build: (center, params, style) => {
-      // Full top ellipse rim + front half of the bottom ellipse + two
-      // vertical seams, traced as one loop. The cap is foreshortened
-      // (ry < rx) so the rims read as ellipses, not circles. No edge is
-      // retraced (F5-AC1); makePolygon's closing seam is the single top
-      // chord, which is one new edge (not a duplicate).
+      // FULL see-through wireframe (v0.5): the complete top ellipse and the
+      // complete bottom ellipse (each split into a back/upper arc through 3π/2
+      // and a front/lower arc through π/2) joined by two vertical seams. The
+      // two seams are retraced (invisible overlap) so the single closed stroke
+      // is a circuit. The closing edge is the LEFT vertical seam
+      // (leftBottom→leftTop) — NEVER a horizontal diameter chord (the v0.4
+      // bug). Caps are foreshortened (ry < rx) so the rims read as ellipses.
       const rx = params.radiusX;
       const ry = (rx * params.capRatio) / 100;
       const topC: Point = {x: center.x, y: center.y - params.height / 2};
       const botC: Point = {x: center.x, y: center.y + params.height / 2};
-      // 32 segments on the full top rim keeps it smooth at icon + page
-      // scale (the front bottom half-rim needs roughly half that), mirroring
-      // how the arrow arcs size their sampling.
-      const TOP_SEGMENTS = 32;
-      const BOT_SEGMENTS = 16;
+      // 32 segments per full top/bottom rim keeps the ellipses smooth at icon
+      // + page scale (16 per half-rim), mirroring the arrow arcs' sampling.
+      const HALF_SEGMENTS = 16;
       const FULL_TURN = 2 * Math.PI;
-      const rightTop: Point = {x: topC.x + rx, y: topC.y};
-      // Top rim: full ellipse starting and ending at the left point (π → π + a
-      // full turn).
-      const topRim = ellipseArcPoints(topC, rx, ry, Math.PI, Math.PI + FULL_TURN, TOP_SEGMENTS);
-      // Bottom rim: front half only (left π → right 0, through +y front). Its
-      // first point (π) IS the bottom-left vertex, so it doubles as the left
-      // seam's lower endpoint — no separate vertex needed (mirrors the cone,
-      // whose arc endpoints serve as the slant-seam attachments).
-      const botFront = ellipseArcPoints(botC, rx, ry, Math.PI, 0, BOT_SEGMENTS);
-      return makePolygon([...topRim, ...botFront, rightTop], style);
+      const leftTop: Point = {x: topC.x - rx, y: topC.y};
+      const rightBottom: Point = {x: botC.x + rx, y: botC.y};
+      // Back arcs (through 3π/2 = top/back), then front arcs (through π/2 =
+      // bottom/front). Seam direction: top→bottom on the right, bottom→top on
+      // the left; the right seam recurs (retrace) and makePolygon closes the
+      // left seam (retrace).
+      const topBack = ellipseArcPoints(topC, rx, ry, Math.PI, FULL_TURN, HALF_SEGMENTS);
+      const botBack = ellipseArcPoints(botC, rx, ry, FULL_TURN, Math.PI, HALF_SEGMENTS);
+      const topFront = ellipseArcPoints(topC, rx, ry, Math.PI, 0, HALF_SEGMENTS);
+      const botFront = ellipseArcPoints(botC, rx, ry, 0, Math.PI, HALF_SEGMENTS);
+      return makePolygon(
+        [
+          leftTop,
+          ...topBack, // → rightTop
+          rightBottom, // right seam ↓
+          ...botBack, // → leftBottom
+          leftTop, // left seam ↑
+          ...topFront, // → rightTop
+          rightBottom, // right seam ↓ (retrace)
+          ...botFront, // → leftBottom; close leftBottom→leftTop = left seam (retrace)
+        ],
+        style,
+      );
     },
   },
 
@@ -927,24 +940,28 @@ export const SHAPES: readonly Shape[] = [
       {id: 'capRatio', label: 'Cap (%)', defaultValue: 28, min: 10, max: 60, unit: '%'},
     ],
     build: (center, params, style) => {
-      // Apex + front half of the elliptical base + two straight slant
-      // seams, as one closed polygon with no retracing (F6-AC4). The base
-      // front arc dips ry below baseCenter, so the apex/base stack is
-      // offset to absorb that overhang while keeping the apex→base axial
-      // height equal to `height` and the bbox centered on `center` (F6-FR4):
+      // FULL see-through wireframe (v0.5): apex + the COMPLETE base ellipse
+      // (back arc through 3π/2 + front arc through π/2) + two straight slant
+      // seams. The first real edge apex→leftBase is the left slant; the front
+      // base arc is retraced once (invisible overlap) so the close
+      // rightBase→apex is the right slant — a real edge, NOT a chord. The
+      // apex/base stack is offset to absorb the base's ry overhang so the
+      // apex→base axial height stays `height` and the bbox is centered on
+      // `center` (F6-FR4):
       //   apex      = center − (0, (height + ry)/2)
       //   baseCenter = center + (0, (height − ry)/2)
       const rx = params.radiusX;
       const ry = (rx * params.capRatio) / 100;
       const apex: Point = {x: center.x, y: center.y - (params.height + ry) / 2};
       const baseC: Point = {x: center.x, y: center.y + (params.height - ry) / 2};
-      const BASE_SEGMENTS = 16;
-      // Front half of the base: left (π) → right (0) through +y (front).
-      // The arc endpoints are the left/right base extremes the slant seams
-      // attach to, so no separate seam vertices are needed. The closing
-      // apex→apex seam is zero-length and harmless (EC5).
-      const baseFront = ellipseArcPoints(baseC, rx, ry, Math.PI, 0, BASE_SEGMENTS);
-      return makePolygon([apex, ...baseFront, apex], style);
+      const HALF_SEGMENTS = 16;
+      // base BACK arc: leftBase (π) → rightBase (2π) through 3π/2 (top/back).
+      const baseBack = ellipseArcPoints(baseC, rx, ry, Math.PI, 2 * Math.PI, HALF_SEGMENTS);
+      // base FRONT arc, down then up: rightBase (0) → leftBase (π) through π/2
+      // (bottom/front), then leftBase (π) → rightBase (0) retraced.
+      const baseFrontDown = ellipseArcPoints(baseC, rx, ry, 0, Math.PI, HALF_SEGMENTS);
+      const baseFrontUp = ellipseArcPoints(baseC, rx, ry, Math.PI, 0, HALF_SEGMENTS);
+      return makePolygon([apex, ...baseBack, ...baseFrontDown, ...baseFrontUp], style);
     },
   },
 
