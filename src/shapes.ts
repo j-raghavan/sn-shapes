@@ -658,7 +658,12 @@ export const SHAPES: readonly Shape[] = [
       {
         id: 'height',
         label: 'Height (px)',
-        defaultValue: 200,
+        // Distinct from `width` on purpose: a 1:1 default previously
+        // rendered (and rasterised into the palette icon) as a rounded
+        // square instead of a rectangle. See reported palette bug where
+        // the "Rounded Rectangle" primitive was indistinguishable from a
+        // rounded square at default parameters.
+        defaultValue: 120,
         min: 1,
         unit: 'px',
       },
