@@ -112,6 +112,18 @@ describe('createKvBackedFavoritesStorage', () => {
     expect(await s.load()).toEqual([]);
   });
 
+  it('returns [] when the parsed JSON is a primitive, not an object', async () => {
+    const kv = makeKvShim({[FAVORITES_STORAGE_KEY]: '42'});
+    const s = createKvBackedFavoritesStorage(kv);
+    expect(await s.load()).toEqual([]);
+  });
+
+  it('returns [] when the parsed JSON is literally null', async () => {
+    const kv = makeKvShim({[FAVORITES_STORAGE_KEY]: 'null'});
+    const s = createKvBackedFavoritesStorage(kv);
+    expect(await s.load()).toEqual([]);
+  });
+
   it('returns [] when the envelope is shaped wrong', async () => {
     const kv = makeKvShim({
       [FAVORITES_STORAGE_KEY]: JSON.stringify({version: 1, favorites: 'oops'}),
@@ -182,6 +194,60 @@ describe('createKvBackedFavoritesStorage', () => {
     const s = createKvBackedFavoritesStorage(kv);
     await expect(s.save(['rectangle'])).resolves.toBeUndefined();
     expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+});
+
+describe('tryLoadAsyncStorage backend resolution (via getDefaultFavoritesStorage)', () => {
+  // The dep isn't installed in this repo, so getDefaultFavoritesStorage()
+  // resolves the in-memory fallback in every other test in this file
+  // (see the module header comment). These cases use a virtual jest
+  // mock to simulate the dep being present, exercising the success path
+  // of tryLoadAsyncStorage() that the other tests can't reach.
+  const MODULE_ID = '@react-native-async-storage/async-storage';
+
+  afterEach(() => {
+    jest.dontMock(MODULE_ID);
+    jest.resetModules();
+  });
+
+  it('adopts the module when it exposes an ESM-style default export', async () => {
+    const getItem = jest.fn(async () => null);
+    const setItem = jest.fn(async () => {});
+    jest.doMock(MODULE_ID, () => ({default: {getItem, setItem}}), {virtual: true});
+
+    let freshModule: typeof import('../src/favoritesStorage');
+    jest.isolateModules(() => {
+      freshModule = require('../src/favoritesStorage');
+    });
+    const storage = freshModule!.getDefaultFavoritesStorage();
+    await storage.load();
+    expect(getItem).toHaveBeenCalledWith(freshModule!.FAVORITES_STORAGE_KEY);
+  });
+
+  it('adopts the module when it exposes a plain CJS export (no default)', async () => {
+    const getItem = jest.fn(async () => null);
+    const setItem = jest.fn(async () => {});
+    jest.doMock(MODULE_ID, () => ({getItem, setItem}), {virtual: true});
+
+    let freshModule: typeof import('../src/favoritesStorage');
+    jest.isolateModules(() => {
+      freshModule = require('../src/favoritesStorage');
+    });
+    const storage = freshModule!.getDefaultFavoritesStorage();
+    await storage.save(['rectangle']);
+    expect(setItem).toHaveBeenCalled();
+  });
+
+  it('falls back to memory when the resolved module lacks getItem/setItem', async () => {
+    jest.doMock(MODULE_ID, () => ({default: {notAKvBackend: true}}), {virtual: true});
+
+    let freshModule: typeof import('../src/favoritesStorage');
+    jest.isolateModules(() => {
+      freshModule = require('../src/favoritesStorage');
+    });
+    const storage = freshModule!.getDefaultFavoritesStorage();
+    await storage.save(['circle']);
+    expect(await storage.load()).toEqual(['circle']);
   });
 });
 

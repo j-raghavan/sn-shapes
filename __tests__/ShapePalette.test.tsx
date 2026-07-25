@@ -1,5 +1,6 @@
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
+import {Pressable, Text} from 'react-native';
 
 jest.mock('sn-plugin-lib', () => {
   return {
@@ -33,6 +34,7 @@ import {
   nextCategory,
   WIDTH_PRESETS,
   COLOR_PRESETS,
+  MAX_FAVORITES,
 } from '../src/shapes';
 import {
   FavoritesStorage,
@@ -501,6 +503,37 @@ describe('ShapePalette (merged popup)', () => {
     );
   });
 
+  it('falls back to default page width when getCurrentFilePath resolves unsuccessfully (not rejected)', async () => {
+    (PluginCommAPI.getCurrentFilePath as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      error: {message: 'no file open'},
+    });
+    const tree = await mountPalette();
+    await pressInsert(tree);
+    expect(PluginFileAPI.getPageSize).not.toHaveBeenCalled();
+    const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+    const xs = geo.points.map((p: {x: number}) => p.x);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(
+      DEFAULT_PAGE_WIDTH / 2,
+      -1,
+    );
+  });
+
+  it('falls back to default page width when getPageSize resolves unsuccessfully (not rejected)', async () => {
+    (PluginFileAPI.getPageSize as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      error: {message: 'bad page'},
+    });
+    const tree = await mountPalette();
+    await pressInsert(tree);
+    const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+    const xs = geo.points.map((p: {x: number}) => p.x);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(
+      DEFAULT_PAGE_WIDTH / 2,
+      -1,
+    );
+  });
+
   // -------------------------------------------------------------------------
   // Error handling
   // -------------------------------------------------------------------------
@@ -828,16 +861,25 @@ describe('ShapePalette (merged popup)', () => {
     expect(previewIcon.props.source).toBe(SHAPE_ICONS.octagon);
   });
 
-  // The MAX_FAVORITES cap behavior is covered exhaustively at the pure
-  // reducer level in shapes.test.ts (`toggleFavorite returns "capped"
-  // with the input unchanged at the limit`). Exercising it through
-  // the UI here would require seeding storage with MAX_FAVORITES
-  // distinct *valid* shape ids — but with MAX_FAVORITES === SHAPES.length
-  // in the current catalogue, every real shape would already be
-  // favorited and there would be no unfavorited shape to tap. The
-  // post-hydration sanitisation step (which correctly drops synthetic
-  // placeholder ids) closes the synthetic-seed loophole. Once the
-  // catalogue grows past MAX_FAVORITES, add a UI-level cap test here.
+  it('shows an error banner and does not add when favorites are at MAX_FAVORITES (capped)', async () => {
+    // Seed storage with MAX_FAVORITES distinct real shape ids, excluding
+    // the default selection ('rectangle') so there's a real un-favorited
+    // shape left to tap-heart and trigger the cap.
+    const seededIds = SHAPES.map(s => s.id)
+      .filter(id => id !== 'rectangle')
+      .slice(0, MAX_FAVORITES);
+    expect(seededIds).toHaveLength(MAX_FAVORITES);
+    const seeded = createMemoryFavoritesStorage(seededIds);
+    const tree = await mountPalette(seeded);
+    await tapFavorite(tree);
+    const banner = findByTestID(tree, TEST_IDS.error);
+    expect(banner).toBeTruthy();
+    expect(banner.findByType(Text).props.children).toBe(
+      `Max ${MAX_FAVORITES} favorites reached. Remove one first.`,
+    );
+    // Rectangle must NOT have been added — the toggle was rejected.
+    expect(await seeded.load()).toEqual(seededIds);
+  });
 
   it('does NOT insert when the heart toggle is tapped', async () => {
     // Heart toggle is a state mutation only — must not commit a shape.
@@ -872,6 +914,227 @@ describe('ShapePalette (merged popup)', () => {
     await act(async () => {
       if (resolveInsert) {resolveInsert();}
       await flushPromises();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Defensive branches (cleanup, event isolation)
+  // -------------------------------------------------------------------------
+
+  it('tapping inside the panel does not propagate to the overlay (stopPropagation)', async () => {
+    const tree = await mountPalette();
+    const panelPressable = tree.root.findAllByType(Pressable)[1];
+    const stopPropagation = jest.fn();
+    act(() => {
+      panelPressable.props.onPress({stopPropagation});
+    });
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(PluginManager.closePluginView).not.toHaveBeenCalled();
+    expect(PluginCommAPI.insertGeometry).not.toHaveBeenCalled();
+  });
+
+  it('unmounting without a pending error does not throw (cleanup no-op)', async () => {
+    const tree = await mountPalette();
+    expect(() => {
+      act(() => { tree.unmount(); });
+    }).not.toThrow();
+  });
+
+  it('clears the pending error-dismiss timer on unmount', async () => {
+    (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+    const tree = await mountPalette();
+    await pressInsert(tree);
+    expect(() => findByTestID(tree, TEST_IDS.error)).not.toThrow();
+    expect(() => {
+      act(() => { tree.unmount(); });
+    }).not.toThrow();
+  });
+
+  it('unmounting while favorites are still hydrating does not throw', async () => {
+    const neverResolves: FavoritesStorage = {
+      load: () => new Promise<readonly ShapeId[]>(() => {}),
+      save: async () => {},
+    };
+    let tree: ReactTestRenderer;
+    act(() => {
+      tree = create(<ShapePalette storage={neverResolves} />);
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(() => {
+      act(() => { tree.unmount(); });
+    }).not.toThrow();
+  });
+
+  it('ignores a favorites load that resolves after unmount (cancelled guard)', async () => {
+    let resolveLoad: (v: readonly ShapeId[]) => void;
+    const delayedStorage: FavoritesStorage = {
+      load: () => new Promise(r => { resolveLoad = r; }),
+      save: async () => {},
+    };
+    let tree: ReactTestRenderer;
+    act(() => {
+      tree = create(<ShapePalette storage={delayedStorage} />);
+    });
+    await act(async () => { await flushPromises(); });
+    act(() => { tree.unmount(); });
+    // Resolve the load AFTER unmount — the `cancelled` guard must prevent
+    // any post-unmount state update. act() would surface a React warning
+    // as a failure if the guard were missing.
+    await act(async () => {
+      resolveLoad!(['circle']);
+      await flushPromises();
+    });
+  });
+
+  it('falls back to getDefaultFavoritesStorage() when no storage prop is provided', async () => {
+    let tree: ReactTestRenderer;
+    act(() => {
+      tree = create(<ShapePalette />);
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+    expect(tree!.toJSON()).toBeTruthy();
+  });
+
+  it('replaces an in-flight error-dismiss timer when a second insert failure fires before the first clears', async () => {
+    (PluginCommAPI.insertGeometry as jest.Mock)
+      .mockRejectedValueOnce(new Error('first'))
+      .mockRejectedValueOnce(new Error('second'));
+    const tree = await mountPalette();
+    await pressInsert(tree);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('first');
+    await pressInsert(tree);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('second');
+  });
+
+  it('replaces an in-flight error-dismiss timer when a favorites-cap error follows an insert failure', async () => {
+    // handleOverlayPress pre-clears errorTimerRef itself before each
+    // attempt, so two insert failures in a row never exercise showError's
+    // OWN stale-timer guard. handleToggleFavorite's "capped" path calls
+    // showError without any such pre-clear, so chaining it after an
+    // insert failure is what actually reaches that guard.
+    (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce(new Error('insert boom'));
+    const seededIds = SHAPES.map(s => s.id)
+      .filter(id => id !== 'rectangle')
+      .slice(0, MAX_FAVORITES);
+    const seeded = createMemoryFavoritesStorage(seededIds);
+    const tree = await mountPalette(seeded);
+    await pressInsert(tree);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe(
+      'insert boom',
+    );
+    await tapFavorite(tree); // 'rectangle' isn't in seededIds -> hits the cap
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe(
+      `Max ${MAX_FAVORITES} favorites reached. Remove one first.`,
+    );
+  });
+
+  it('shows the default "Insert failed" message when insertGeometry rejects with a non-Error value', async () => {
+    (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce('boom-string');
+    const tree = await mountPalette();
+    await pressInsert(tree);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe(
+      'Insert failed',
+    );
+  });
+
+  it('ignores a shape-cell tap while a commit is in flight (insertingRef guard)', async () => {
+    let resolveInsert: () => void;
+    (PluginCommAPI.insertGeometry as jest.Mock).mockImplementationOnce(
+      () => new Promise<void>(r => { resolveInsert = r; }),
+    );
+    const tree = await mountPalette();
+    act(() => { findByTestID(tree, TEST_IDS.overlay).props.onPress(); });
+    await act(async () => { await flushPromises(); });
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.cell('circle')).props.onPress();
+      await flushPromises();
+    });
+    await act(async () => { resolveInsert(); await flushPromises(); });
+    // Selection must still be the original default ('rectangle') — the
+    // busy-window tap on 'circle' was dropped.
+    await pressInsert(tree);
+    const secondArg = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[1][0];
+    expect(secondArg.type).toBe('GEO_polygon');
+  });
+
+  it('ignores width and color taps while a commit is in flight (insertingRef guard)', async () => {
+    let resolveInsert: () => void;
+    (PluginCommAPI.insertGeometry as jest.Mock).mockImplementationOnce(
+      () => new Promise<void>(r => { resolveInsert = r; }),
+    );
+    const tree = await mountPalette();
+    act(() => { findByTestID(tree, TEST_IDS.overlay).props.onPress(); });
+    await act(async () => { await flushPromises(); });
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.widthButton(900)).props.onPress();
+      findByTestID(tree, TEST_IDS.colorButton(0xC9)).props.onPress();
+      await flushPromises();
+    });
+    await act(async () => { resolveInsert(); await flushPromises(); });
+    // Second commit reflects the UNCHANGED default style — the
+    // busy-window picks were dropped.
+    await pressInsert(tree);
+    const secondArg = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[1][0];
+    expect(secondArg.penWidth).toBe(PEN_DEFAULTS.penWidth);
+    expect(secondArg.penColor).toBe(PEN_DEFAULTS.penColor);
+  });
+
+  it('ignores a favorite-toggle tap while a commit is in flight (insertingRef guard)', async () => {
+    let resolveInsert: () => void;
+    (PluginCommAPI.insertGeometry as jest.Mock).mockImplementationOnce(
+      () => new Promise<void>(r => { resolveInsert = r; }),
+    );
+    const tree = await mountPalette();
+    act(() => { findByTestID(tree, TEST_IDS.overlay).props.onPress(); });
+    await act(async () => { await flushPromises(); });
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.favoriteToggle).props.onPress();
+      await flushPromises();
+    });
+    await act(async () => { resolveInsert(); await flushPromises(); });
+    await navigateToCategory(tree, 'favorites');
+    expect(() => findByTestID(tree, TEST_IDS.favoritesEmpty)).not.toThrow();
+  });
+
+  it('a favorite-toggle tap before hydration completes is dropped, not merged after hydration', async () => {
+    let resolveLoad: (v: readonly ShapeId[]) => void;
+    const delayedStorage: FavoritesStorage = {
+      load: () => new Promise(r => { resolveLoad = r; }),
+      save: async () => {},
+    };
+    let tree: ReactTestRenderer;
+    act(() => {
+      tree = create(<ShapePalette storage={delayedStorage} />);
+    });
+    await act(async () => { await flushPromises(); });
+    // Tapping directly bypasses the `disabled` prop, which only the real
+    // native renderer enforces — this exercises the internal
+    // favoritesHydrated guard itself.
+    await act(async () => {
+      findByTestID(tree!, TEST_IDS.favoriteToggle).props.onPress();
+      await flushPromises();
+    });
+    await act(async () => {
+      resolveLoad!(['circle']);
+      await flushPromises();
+    });
+    await navigateToCategory(tree!, 'favorites');
+    expect(() => findByTestID(tree!, TEST_IDS.cell('circle'))).not.toThrow();
+    expect(() => findByTestID(tree!, TEST_IDS.cell('rectangle'))).toThrow();
+  });
+
+  it('computes pressed styles for every interactive control without throwing', async () => {
+    const tree = await mountPalette();
+    const pressables = tree.root.findAllByType(Pressable);
+    const withFunctionStyle = pressables.filter(p => typeof p.props.style === 'function');
+    expect(withFunctionStyle.length).toBeGreaterThan(0);
+    withFunctionStyle.forEach(p => {
+      expect(() => p.props.style({pressed: true})).not.toThrow();
     });
   });
 });
