@@ -67,6 +67,27 @@ describe('geometryNaturalBounds', () => {
     );
   });
 
+  it('finds the AABB when the extreme points are not the first vertex', () => {
+    // Ordered so the leftmost/rightmost/topmost/bottommost values each
+    // arrive after a vertex that doesn't hold that extreme — exercises
+    // every "new min/max found mid-scan" branch, not just the
+    // first-vertex initial values.
+    const g: Geometry = {
+      type: 'GEO_polygon',
+      penColor: 0, penType: 10, penWidth: 400,
+      points: [
+        {x: 0, y: 50},
+        {x: -20, y: 0},
+        {x: 40, y: 80},
+        {x: 5, y: -30},
+      ],
+    };
+    expectRectClose(
+      geometryNaturalBounds(g)!,
+      {left: -20, right: 40, top: -30, bottom: 80},
+    );
+  });
+
   it('returns AABB of a straight line from its endpoints', () => {
     const g: Geometry = {
       type: 'straightLine',
@@ -86,6 +107,27 @@ describe('geometryNaturalBounds', () => {
 
   it('returns null for a polygon missing points', () => {
     const g: Geometry = {type: 'GEO_polygon', penColor: 0, penType: 10, penWidth: 400};
+    expect(geometryNaturalBounds(g)).toBeNull();
+  });
+
+  it('returns null for a circle/ellipse missing its center point', () => {
+    const g: Geometry = {
+      type: 'GEO_circle',
+      penColor: 0, penType: 10, penWidth: 400,
+      ellipseMajorAxisRadius: 100,
+      ellipseMinorAxisRadius: 100,
+    };
+    expect(geometryNaturalBounds(g)).toBeNull();
+  });
+
+  it('returns null for a circle/ellipse with non-numeric radii', () => {
+    const g: Geometry = {
+      type: 'GEO_ellipse',
+      penColor: 0, penType: 10, penWidth: 400,
+      ellipseCenterPoint: {x: 0, y: 0},
+      ellipseMajorAxisRadius: 'oops' as unknown as number,
+      ellipseMinorAxisRadius: 100,
+    };
     expect(geometryNaturalBounds(g)).toBeNull();
   });
 });
@@ -225,6 +267,38 @@ describe('applyRectTransform', () => {
     expect(applyRectTransform(g, rect, {...rect, right: 200})).toBe(g);
   });
 
+  it('returns input unchanged for a circle/ellipse missing its center point', () => {
+    const g: Geometry = {
+      type: 'GEO_circle',
+      penColor: 0, penType: 10, penWidth: 400,
+      ellipseMajorAxisRadius: 100,
+      ellipseMinorAxisRadius: 100,
+    };
+    const from: Rect = {left: 0, top: 0, right: 100, bottom: 100};
+    const to: Rect = {left: 0, top: 0, right: 200, bottom: 200};
+    expect(applyRectTransform(g, from, to)).toBe(g);
+  });
+
+  it('returns input unchanged for a circle/ellipse with non-numeric radii', () => {
+    const g: Geometry = {
+      type: 'GEO_ellipse',
+      penColor: 0, penType: 10, penWidth: 400,
+      ellipseCenterPoint: {x: 0, y: 0},
+      ellipseMajorAxisRadius: 100,
+      ellipseMinorAxisRadius: 'oops' as unknown as number,
+    };
+    const from: Rect = {left: -100, top: -100, right: 100, bottom: 100};
+    const to: Rect = {left: -200, top: -200, right: 200, bottom: 200};
+    expect(applyRectTransform(g, from, to)).toBe(g);
+  });
+
+  it('returns input unchanged for a polygon/line missing its points array', () => {
+    const g: Geometry = {type: 'GEO_polygon', penColor: 0, penType: 10, penWidth: 400};
+    const from: Rect = {left: 0, top: 0, right: 100, bottom: 100};
+    const to: Rect = {left: 0, top: 0, right: 200, bottom: 200};
+    expect(applyRectTransform(g, from, to)).toBe(g);
+  });
+
   it('returns input unchanged when source rect is degenerate', () => {
     const g: Geometry = {
       type: 'GEO_polygon',
@@ -274,6 +348,12 @@ describe('bakeLassoResize', () => {
 
   it('returns input when lassoRect is null', () => {
     expect(bakeLassoResize(circle, null)).toBe(circle);
+  });
+
+  it('returns input unchanged when the geometry has no natural bounds', () => {
+    const unknownType: Geometry = {type: 'GEO_mystery', penColor: 0, penType: 10, penWidth: 400};
+    const someRect: Rect = {left: 0, top: 0, right: 100, bottom: 100};
+    expect(bakeLassoResize(unknownType, someRect)).toBe(unknownType);
   });
 
   it('returns input when lassoRect matches natural bounds within tolerance', () => {

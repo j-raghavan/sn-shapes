@@ -27,6 +27,7 @@ import {
   obliqueDepth,
   buildBoxPoints,
   buildPyramidPoints,
+  penColorToSwatch,
 } from '../src/shapes';
 
 const CENTER: Point = {x: 100, y: 100};
@@ -107,6 +108,12 @@ describe('regularPolygon', () => {
   it('is centered around the given center', () => {
     expectSymmetric(regularPolygon(CENTER, 50, 6), CENTER);
   });
+
+  it('rejects fewer than 3 sides', () => {
+    expect(() => regularPolygon(CENTER, 50, 2)).toThrow(
+      'regularPolygon requires at least 3 sides, got 2',
+    );
+  });
 });
 
 describe('roundedRectPoints', () => {
@@ -135,6 +142,31 @@ describe('roundedRectPoints', () => {
       expect(p.y).toBeGreaterThanOrEqual(CENTER.y - hh - 0.01);
       expect(p.y).toBeLessThanOrEqual(CENTER.y + hh + 0.01);
     });
+  });
+});
+
+describe('penColorToSwatch', () => {
+  it('falls back to black for undefined input', () => {
+    expect(penColorToSwatch(undefined)).toBe('#000000');
+  });
+
+  it('falls back to black for non-finite input', () => {
+    expect(penColorToSwatch(NaN)).toBe('#000000');
+    expect(penColorToSwatch(Infinity)).toBe('#000000');
+  });
+
+  it('returns the exact preset swatch for a known preset value', () => {
+    expect(penColorToSwatch(0x00)).toBe('#000000');
+    expect(penColorToSwatch(0x9D)).toBe('#5A5A5A');
+  });
+
+  it('derives a raw grayscale swatch for a byte outside COLOR_PRESETS', () => {
+    expect(penColorToSwatch(128)).toBe('#808080');
+  });
+
+  it('clamps out-of-range bytes into 0..255 before deriving the swatch', () => {
+    expect(penColorToSwatch(-10)).toBe('#000000');
+    expect(penColorToSwatch(300)).toBe('#FFFFFF');
   });
 });
 
@@ -868,6 +900,30 @@ describe('SHAPES', () => {
     expect(geo.points.length).toBeGreaterThan(4);
   });
 
+  it('roundedRect default width and height are not equal (renders as a rectangle, not a square)', () => {
+    // Regression guard: width/height defaults previously matched (200/200),
+    // so the palette icon and default insert both rendered a rounded
+    // square under the "Rounded Rectangle" label.
+    const shape = SHAPES.find(s => s.id === 'roundedRect');
+    if (!shape) {throw new Error('roundedRect shape not found');}
+    const widthParam = shape.parameters.find(p => p.id === 'width');
+    const heightParam = shape.parameters.find(p => p.id === 'height');
+    expect(widthParam?.defaultValue).toBeDefined();
+    expect(heightParam?.defaultValue).toBeDefined();
+    expect(widthParam?.defaultValue).not.toBe(heightParam?.defaultValue);
+  });
+
+  it('roundedRect built geometry bounding box is wider than it is tall by default', () => {
+    const geo = buildShape('roundedRect');
+    assertPolygon(geo);
+    const xs = geo.points.map(p => p.x);
+    const ys = geo.points.map(p => p.y);
+    const bboxWidth = Math.max(...xs) - Math.min(...xs);
+    const bboxHeight = Math.max(...ys) - Math.min(...ys);
+    expect(bboxWidth).not.toBeCloseTo(bboxHeight, 0);
+    expect(bboxWidth).toBeGreaterThan(bboxHeight);
+  });
+
   it.each([
     ['pentagon', 6],
     ['hexagon', 7],
@@ -903,6 +959,15 @@ describe('ShapeCategory model', () => {
     const shape = SHAPES.find(s => s.id === 'rectangle')!;
     const result = shapeCategories(shape);
     expect(result).toEqual(['basic']);
+  });
+
+  it('shapeCategories passes an already-array category through unchanged', () => {
+    // No current SHAPES entry is cross-listed, so this constructs a
+    // synthetic multi-category shape to exercise the Array.isArray(c)
+    // branch of the normalisation helper.
+    const base = SHAPES.find(s => s.id === 'rectangle')!;
+    const crossListed = {...base, category: ['basic', 'flowchart'] as const};
+    expect(shapeCategories(crossListed)).toEqual(['basic', 'flowchart']);
   });
 
   it('shapesInCategory("basic") returns all v1.0.3 primitives', () => {

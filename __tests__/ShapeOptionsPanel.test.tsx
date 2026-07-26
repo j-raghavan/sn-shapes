@@ -12,6 +12,7 @@
  */
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
+import {Pressable, Text} from 'react-native';
 
 // penWidth bumped 400 → 500 on 2026-04-18: WIDTH_PRESETS collapsed to 5
 // entries (XS=100, S=300, M=500, L=700, XL=900) so 400 µm no longer
@@ -623,6 +624,231 @@ describe('ShapeOptionsPanel', () => {
     await act(async () => {
       resolveModify?.({success: true});
       await flushPromises();
+    });
+  });
+
+  // ---- Defensive branches (error paths, cleanup, event isolation) ----
+
+  it('shows empty-state and logs when getLassoGeometries throws', async () => {
+    (PluginCommAPI.getLassoGeometries as jest.Mock).mockRejectedValueOnce(
+      new Error('bridge down'),
+    );
+    const tree = await renderAndLoad();
+    expect(() => findByTestID(tree, TEST_IDS.empty)).not.toThrow();
+    expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+
+  it('falls back to un-baked modify when getLassoRect resolves with a malformed rect', async () => {
+    (PluginCommAPI.getLassoRect as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      result: {left: 'nope'},
+    });
+    const tree = await renderAndLoad();
+    const target = WIDTH_PRESETS[0].value;
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(target)).props.onPress(),
+    ]);
+    expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.ellipseMajorAxisRadius).toBe(DEFAULT_GEOMETRY.ellipseMajorAxisRadius);
+    expect(arg.penWidth).toBe(target);
+  });
+
+  it('falls back to un-baked modify and logs when getLassoRect throws', async () => {
+    (PluginCommAPI.getLassoRect as jest.Mock).mockRejectedValueOnce(
+      new Error('bridge down'),
+    );
+    const tree = await renderAndLoad();
+    const target = WIDTH_PRESETS[0].value;
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(target)).props.onPress(),
+    ]);
+    expect(consoleErrorSpy).toHaveBeenCalled();
+    expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.ellipseMajorAxisRadius).toBe(DEFAULT_GEOMETRY.ellipseMajorAxisRadius);
+  });
+
+  it('clears the pending error-dismiss timer on unmount', async () => {
+    (PluginCommAPI.modifyLassoGeometry as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      error: {code: 4, message: 'host rejected'},
+    });
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress(),
+    ]);
+    expect(() => findByTestID(tree, TEST_IDS.error)).not.toThrow();
+    expect(() => {
+      act(() => { tree.unmount(); });
+    }).not.toThrow();
+  });
+
+  it('unmounting without a pending error does not throw (cleanup no-op)', async () => {
+    const tree = await renderAndLoad();
+    expect(() => {
+      act(() => { tree.unmount(); });
+    }).not.toThrow();
+  });
+
+  it('tapping overlay before any geometry loads just closes without computing changes', async () => {
+    (PluginCommAPI.getLassoGeometries as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      result: [],
+    });
+    const tree = await renderAndLoad();
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+      await flushPromises();
+    });
+    expect(PluginManager.closePluginView).toHaveBeenCalled();
+    expect(PluginCommAPI.modifyLassoGeometry).not.toHaveBeenCalled();
+  });
+
+  it('shows error banner and does not close when deleteLassoElements throws', async () => {
+    (PluginCommAPI.deleteLassoElements as jest.Mock).mockRejectedValueOnce(
+      new Error('bridge blew up'),
+    );
+    const tree = await renderAndLoad();
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.delete).props.onPress();
+      await flushPromises();
+    });
+    expect(() => findByTestID(tree, TEST_IDS.error)).not.toThrow();
+    expect(PluginManager.closePluginView).not.toHaveBeenCalled();
+  });
+
+  it('tapping inside the panel does not propagate to the overlay (stopPropagation)', async () => {
+    const tree = await renderAndLoad();
+    const panelPressable = tree.root.findAllByType(Pressable)[1];
+    const stopPropagation = jest.fn();
+    act(() => {
+      panelPressable.props.onPress({stopPropagation});
+    });
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(PluginManager.closePluginView).not.toHaveBeenCalled();
+    expect(PluginCommAPI.modifyLassoGeometry).not.toHaveBeenCalled();
+  });
+
+  it('shows empty-state when the first lasso geometry is not an object', async () => {
+    (PluginCommAPI.getLassoGeometries as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      result: ['not-an-object'],
+    });
+    const tree = await renderAndLoad();
+    expect(() => findByTestID(tree, TEST_IDS.empty)).not.toThrow();
+  });
+
+  it('replaces an in-flight error-dismiss timer when a second error fires before the first clears', async () => {
+    (PluginCommAPI.modifyLassoGeometry as jest.Mock)
+      .mockResolvedValueOnce({success: false, error: {message: 'first'}})
+      .mockResolvedValueOnce({success: false, error: {message: 'second'}});
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress(),
+    ]);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('first');
+    // Second commit attempt fires before the first error's 2000ms
+    // auto-dismiss timer elapses — showError must clear the stale timer
+    // before scheduling a new one, or the first timer would later clear
+    // this second (still-relevant) error out from under it.
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+      await flushPromises();
+    });
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('second');
+  });
+
+  it('shows the default "Modify failed" message when the API omits an error payload', async () => {
+    (PluginCommAPI.modifyLassoGeometry as jest.Mock).mockResolvedValueOnce({success: false});
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress(),
+    ]);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('Modify failed');
+  });
+
+  it('shows the default "Modify failed" message when modifyLassoGeometry rejects with a non-Error value', async () => {
+    (PluginCommAPI.modifyLassoGeometry as jest.Mock).mockRejectedValueOnce('boom-string');
+    const tree = await renderAndLoad();
+    await tapAndCommit(tree, [
+      () => findByTestID(tree, TEST_IDS.colorButton(COLOR_PRESETS[1].value)).props.onPress(),
+    ]);
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('Modify failed');
+  });
+
+  it('shows the default "Delete failed" message when the API omits an error payload', async () => {
+    (PluginCommAPI.deleteLassoElements as jest.Mock).mockResolvedValueOnce({success: false});
+    const tree = await renderAndLoad();
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.delete).props.onPress();
+      await flushPromises();
+    });
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('Delete failed');
+  });
+
+  it('shows the default "Delete failed" message when deleteLassoElements rejects with a non-Error value', async () => {
+    (PluginCommAPI.deleteLassoElements as jest.Mock).mockRejectedValueOnce('boom-string');
+    const tree = await renderAndLoad();
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.delete).props.onPress();
+      await flushPromises();
+    });
+    expect(findByTestID(tree, TEST_IDS.error).findByType(Text).props.children).toBe('Delete failed');
+  });
+
+  it('ignores width/color/pen-type/delete taps while a commit is in flight (busyRef guard)', async () => {
+    let resolveModify: ((value: unknown) => void) | null = null;
+    (PluginCommAPI.modifyLassoGeometry as jest.Mock).mockImplementationOnce(
+      () => new Promise(r => { resolveModify = r; }),
+    );
+    const tree = await renderAndLoad();
+    const target = firstPresetAbove(DEFAULT_GEOMETRY.penWidth);
+    // Stage a real change and kick off the commit, which blocks on the
+    // in-flight modify promise (busyRef.current stays true throughout).
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.widthButton(target)).props.onPress();
+      await flushPromises();
+    });
+    act(() => {
+      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+    });
+    await act(async () => { await flushPromises(); });
+
+    // Every other handler must no-op while busy.
+    await act(async () => {
+      findByTestID(tree, TEST_IDS.widthButton(WIDTH_PRESETS[0].value)).props.onPress();
+      findByTestID(tree, TEST_IDS.colorButton(COLOR_PRESETS[1].value)).props.onPress();
+      findByTestID(tree, TEST_IDS.penTypeButton(11)).props.onPress();
+      findByTestID(tree, TEST_IDS.delete).props.onPress();
+      await flushPromises();
+    });
+    expect(PluginCommAPI.deleteLassoElements).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveModify?.({success: true});
+      await flushPromises();
+    });
+    // Only the pre-busy width change went through; the busy-window taps
+    // (a different width, a color, and a pen type) were all dropped.
+    expect(PluginCommAPI.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+    const arg = (PluginCommAPI.modifyLassoGeometry as jest.Mock).mock.calls[0][0];
+    expect(arg.penWidth).toBe(target);
+    expect(arg.penColor).toBe(DEFAULT_GEOMETRY.penColor);
+    expect(arg.penType).toBe(DEFAULT_GEOMETRY.penType);
+  });
+
+  it('computes pressed styles for every interactive control without throwing', async () => {
+    // Pressable's `style` prop is a callback the real renderer invokes
+    // with the live touch state; react-test-renderer never calls it
+    // automatically. Exercise the `pressed` branch of every button's
+    // style callback directly.
+    const tree = await renderAndLoad();
+    const pressables = tree.root.findAllByType(Pressable);
+    const withFunctionStyle = pressables.filter(p => typeof p.props.style === 'function');
+    expect(withFunctionStyle.length).toBeGreaterThan(0);
+    withFunctionStyle.forEach(p => {
+      expect(() => p.props.style({pressed: true})).not.toThrow();
     });
   });
 });
