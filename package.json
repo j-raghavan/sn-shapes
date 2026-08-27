@@ -15,7 +15,7 @@
   "dependencies": {
     "react": "19.0.0",
     "react-native": "0.79.2",
-    "sn-plugin-lib": "^0.1.43"
+    "sn-plugin-lib": "^0.1.65"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
