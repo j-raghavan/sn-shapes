@@ -25,16 +25,19 @@ installPluginRouter();
 // Declaration alone leaves hasPermission at 0; requesting an undeclared
 // name throws "This permission has not been declared."
 //
-// READ gates PluginFileAPI.getPageSize (and the getElements family);
-// WRITE gates the element-insert/modify calls this plugin makes on the
-// open note. Without them the host either denies the call or, for the
-// FileUtils path, throws SecurityException from inside the native module
-// — which escapes synchronously and kills the plugin, uncatchable in JS.
+// READ gates PluginFileAPI.getPageSize. Without it resolvePageSize()
+// silently falls back to DEFAULT_PAGE_WIDTH/HEIGHT (1404x1872) — correct
+// on a Nomad by coincidence, wrong on any device with different page
+// dimensions, which mis-centres every inserted shape.
+//
+// WRITE is deliberately NOT declared: insertGeometry / modifyLassoGeometry
+// are PluginCommAPI geometry ops and work with no permissions declared
+// (verified on device). The docs' FILE:WRITE examples are the
+// PluginFileAPI element calls, which this plugin does not use.
 // Ref: docs.supernote.com/en/plugin-base/permission
 const requestFilePermissions = async () => {
   for (const name of [
     'plugin.permission.FILE:READ',
-    'plugin.permission.FILE:WRITE',
   ]) {
     try {
       const had = await PluginManager.hasPermission(name);

@@ -8,7 +8,6 @@
   "pluginKey": "SnShapes",
   "jsMainPath": "index",
   "uses-permissions": [
-    "plugin.permission.FILE:READ",
-    "plugin.permission.FILE:WRITE"
+    "plugin.permission.FILE:READ"
   ]
 }
