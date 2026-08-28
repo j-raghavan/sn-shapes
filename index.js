@@ -16,6 +16,39 @@ AppRegistry.registerComponent(appName, () => App);
 PluginManager.init();
 installPluginRouter();
 
+// Chauvet enforces per-plugin file permissions. Everything under shared
+// storage (Note, MyStyle, Document, …) is denied by default; only the
+// plugin's own private dir is exempt. Both halves are required: the names
+// must be declared in PluginConfig.json under `uses-permissions`
+// (kebab-case — `usePermissions`/`usesPermissions` parse to null and are
+// silently ignored), and each must then be requested at runtime.
+// Declaration alone leaves hasPermission at 0; requesting an undeclared
+// name throws "This permission has not been declared."
+//
+// READ gates PluginFileAPI.getPageSize (and the getElements family);
+// WRITE gates the element-insert/modify calls this plugin makes on the
+// open note. Without them the host either denies the call or, for the
+// FileUtils path, throws SecurityException from inside the native module
+// — which escapes synchronously and kills the plugin, uncatchable in JS.
+// Ref: docs.supernote.com/en/plugin-base/permission
+const requestFilePermissions = async () => {
+  for (const name of [
+    'plugin.permission.FILE:READ',
+    'plugin.permission.FILE:WRITE',
+  ]) {
+    try {
+      const had = await PluginManager.hasPermission(name);
+      const got = had > 0 ? had : await PluginManager.requestPermission(name);
+      console.log(`[PERM] ${name} -> ${got}`);
+    } catch (e) {
+      // Never fatal: a denial degrades the feature that needs it rather
+      // than taking the plugin down.
+      console.log(`[PERM] ${name} failed: ${e.message}`);
+    }
+  }
+};
+requestFilePermissions();
+
 // Single entry point: the main toolbar "Shapes" button opens ShapePalette,
 // which now handles all shape creation + styling in one popup. The
 // previous lasso-toolbar "Shape Options" button (id=200) was removed per
