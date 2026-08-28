@@ -6,5 +6,8 @@
   "versionCode": "10008",
   "pluginID": "ismudkearvzd5ffx",
   "pluginKey": "SnShapes",
-  "jsMainPath": "index"
+  "jsMainPath": "index",
+  "uses-permissions": [
+    "plugin.permission.FILE:READ"
+  ]
 }
