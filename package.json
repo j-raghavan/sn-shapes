@@ -1,6 +1,6 @@
 {
   "name": "SnShapes",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Quickly add beautifully centered shapes to your notes: squares, circles, triangles, polygons, and more. Just tap a shape and it's placed right on the page for you.",
   "private": true,
   "scripts": {
