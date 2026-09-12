@@ -84,7 +84,9 @@ the README stop promising "centered" shapes and describe tap-to-place / drag-to-
 - Point 1 fixed directly; point 2 fixed at its only controllable point (insert size).
 - Users who keep tapping get the old behaviour with a better position; nothing is lost.
 - New pure module `src/placement.ts` carries all gesture → geometry logic and is covered in
-  isolation. `ShapePalette.tsx` grows only by the responder handlers and the rubber band.
+  isolation. The responder handlers and rubber band live in `src/PlacementOverlay.tsx`
+  (own component so pen moves do not re-render the panel); `ShapePalette.tsx` only wires
+  `onCommit` into the existing insert flow.
 - Manual on-device confirmation of D2 (dp→px scale, root-view origin) and D5 (e-ink
   behaviour of the rubber band) is the final gate; it is called out in the PR.
 - Out of scope: firmware stroke scaling on lasso resize; zoomed/scrolled page views (the
