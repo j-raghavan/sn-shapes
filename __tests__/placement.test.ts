@@ -5,6 +5,7 @@
  */
 import {
   DRAG_THRESHOLD_PX,
+  isDragGesture,
   MIN_DRAG_SIDE_PX,
   PageSize,
   placeGeometry,
@@ -37,6 +38,18 @@ describe('touchToPage (FR1.2)', () => {
 
   it.each([0, -1, NaN, Infinity])('falls back to scale 1 for %p', bad => {
     expect(touchToPage({x: 10, y: 20}, bad)).toEqual({x: 10, y: 20});
+  });
+});
+
+describe('isDragGesture', () => {
+  it('is false below the default threshold and true at it', () => {
+    expect(isDragGesture({x: 0, y: 0}, {x: 15, y: 0})).toBe(false);
+    expect(isDragGesture({x: 0, y: 0}, {x: 16, y: 0})).toBe(true);
+  });
+
+  it('honours an explicit threshold', () => {
+    expect(isDragGesture({x: 0, y: 0}, {x: 3, y: 4}, 6)).toBe(false);
+    expect(isDragGesture({x: 0, y: 0}, {x: 3, y: 4}, 5)).toBe(true);
   });
 });
 

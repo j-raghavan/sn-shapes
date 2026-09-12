@@ -71,7 +71,6 @@ import {
   ImageSourcePropType,
   ScrollView,
   PixelRatio,
-  GestureResponderEvent,
 } from 'react-native';
 import {
   PluginCommAPI,
@@ -98,15 +97,8 @@ import {
   isAcceptablePenWidth,
 } from './shapes';
 import StrokePreview from './StrokePreview';
-import {
-  DRAG_THRESHOLD_PX,
-  PageSize,
-  PlacementTarget,
-  placeGeometry,
-  resolvePlacementTarget,
-  touchToPage,
-} from './placement';
-import {Point, Rect} from './lassoTransform';
+import PlacementOverlay, {OVERLAY_TEST_IDS} from './PlacementOverlay';
+import {PageSize, PlacementTarget, placeGeometry} from './placement';
 import {
   FavoritesStorage,
   getDefaultFavoritesStorage,
@@ -130,7 +122,10 @@ export const DEFAULT_PAGE_WIDTH = 1404;
 export const DEFAULT_PAGE_HEIGHT = 1872;
 
 export const TEST_IDS = {
-  overlay: 'shapes-overlay',
+  overlay: OVERLAY_TEST_IDS.overlay,
+  // The panel itself — tests use it to prove touches inside never reach
+  // the overlay.
+  panel: 'shapes-panel',
   cell: (id: ShapeId) => `shape-cell-${id}`,
   widthButton: (w: number) => `shapes-width-${w}`,
   colorButton: (c: number) => `shapes-color-${c}`,
@@ -139,9 +134,7 @@ export const TEST_IDS = {
   // overlay tap commits; the ✕ button cancels. Distinct testID so tests
   // can exercise the cancel path without heuristically walking the tree.
   closeButton: 'shapes-close-button',
-  // Dashed outline drawn while the user drags a box on the overlay
-  // (ADR-PEN-PLACEMENT D5). Present only after the drag threshold.
-  rubberBand: 'shapes-rubber-band',
+  rubberBand: OVERLAY_TEST_IDS.rubberBand,
   // Row 1 columns — tests use these to verify the grid + preview layout.
   shapesColumn: 'shapes-shapes-column',
   previewColumn: 'shapes-preview-column',
@@ -322,12 +315,6 @@ type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | nu
 // module-level (ADR-PEN-PLACEMENT D2). DEVICE-UNVERIFIED on Manta.
 const TOUCH_SCALE = PixelRatio.get();
 
-function touchPoint(e: GestureResponderEvent): Point {
-  // pageX/pageY are root-view-relative; locationX/Y would re-origin on
-  // whichever child the pen happens to be over mid-gesture.
-  return {x: e.nativeEvent.pageX, y: e.nativeEvent.pageY};
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -394,18 +381,18 @@ async function insertShape(
   // Build at the page centre with default params, then let placement
   // translate (tap) or fit (drag) it — shapes stay ignorant of gestures.
   const built = shape.build({x: page.width / 2, y: page.height / 2}, params, style);
-  const geometry = placeGeometry(built, target, page) as typeof built;
+  const geometry = placeGeometry(built, target, page);
   // Auto-lasso the element so users can immediately drag it — the
   // element IS the shape.
   geometry.showLassoAfterInsert = true;
   const res = (await PluginCommAPI.insertGeometry(geometry)) as ApiRes<unknown>;
-  // Issue #15 reported a one-off vanishing shape we could not reproduce;
-  // keep the firmware's verdict in logcat so a future report has evidence.
-  console.log('[SHAPES] insertGeometry', target.kind, JSON.stringify(res));
   if (!res?.success) {
     console.error('insertGeometry failed:', JSON.stringify(res));
     throw new Error(res?.error?.message ?? 'insertGeometry failed');
   }
+  // Issue #15 reported a one-off vanishing shape we could not reproduce;
+  // keep the firmware's verdict in logcat so a future report has evidence.
+  console.log('[SHAPES] insertGeometry', target.kind, JSON.stringify(res));
 }
 
 const ERROR_DISPLAY_MS = 2000;
@@ -431,11 +418,10 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
 
   const [pageWidth, setPageWidth] = useState(DEFAULT_PAGE_WIDTH);
   const [pageHeight, setPageHeight] = useState(DEFAULT_PAGE_HEIGHT);
-
-  // Overlay gesture state. The pen-down point lives in a ref (it never
-  // needs a re-render); the rubber band is state because it does.
-  const penDownRef = useRef<Point | null>(null);
-  const [rubberBand, setRubberBand] = useState<Rect | null>(null);
+  const page = useMemo<PageSize>(
+    () => ({width: pageWidth, height: pageHeight}),
+    [pageWidth, pageHeight],
+  );
 
   // Selection state. Default to rectangle — matches the native popup's
   // typical landing state and gives the preview something to show before
@@ -652,7 +638,7 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
       errorTimerRef.current = null;
     }
     try {
-      await insertShape(selectedShape, style, target, {width: pageWidth, height: pageHeight});
+      await insertShape(selectedShape, style, target, page);
       PluginManager.closePluginView();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Insert failed';
@@ -660,78 +646,12 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
     } finally {
       insertingRef.current = false;
     }
-  }, [selectedShape, style, pageWidth, pageHeight, showError]);
-
-  // Responder handlers for the overlay. The panel is a Pressable and so
-  // claims any touch that starts inside it; only touches outside reach
-  // these (ADR-PEN-PLACEMENT D6).
-  const handleOverlayGrant = useCallback((e: GestureResponderEvent) => {
-    penDownRef.current = touchPoint(e);
-    setRubberBand(null);
-  }, []);
-
-  const handleOverlayMove = useCallback((e: GestureResponderEvent) => {
-    const down = penDownRef.current;
-    if (!down) {return;}
-    const now = touchPoint(e);
-    // Threshold is defined in page px; compare in that space so the
-    // rubber band appears at the same physical distance the release
-    // handler uses to classify tap vs drag.
-    const dist = Math.hypot(now.x - down.x, now.y - down.y) * TOUCH_SCALE;
-    if (dist < DRAG_THRESHOLD_PX) {
-      setRubberBand(null);
-      return;
-    }
-    setRubberBand({
-      left: Math.min(down.x, now.x),
-      top: Math.min(down.y, now.y),
-      right: Math.max(down.x, now.x),
-      bottom: Math.max(down.y, now.y),
-    });
-  }, []);
-
-  const handleOverlayRelease = useCallback((e: GestureResponderEvent) => {
-    const down = penDownRef.current ?? touchPoint(e);
-    penDownRef.current = null;
-    setRubberBand(null);
-    const target = resolvePlacementTarget(
-      touchToPage(down, TOUCH_SCALE),
-      touchToPage(touchPoint(e), TOUCH_SCALE),
-      {width: pageWidth, height: pageHeight},
-    );
-    return commitAt(target);
-  }, [commitAt, pageWidth, pageHeight]);
-
-  const handleOverlayTerminate = useCallback(() => {
-    penDownRef.current = null;
-    setRubberBand(null);
-  }, []);
+  }, [selectedShape, style, page, showError]);
 
   return (
-    <View
-      testID={TEST_IDS.overlay}
-      style={styles.container}
-      onStartShouldSetResponder={() => true}
-      onResponderGrant={handleOverlayGrant}
-      onResponderMove={handleOverlayMove}
-      onResponderRelease={handleOverlayRelease}
-      onResponderTerminate={handleOverlayTerminate}>
-      {rubberBand && (
-        <View
-          testID={TEST_IDS.rubberBand}
-          pointerEvents="none"
-          style={[
-            styles.rubberBand,
-            {
-              left: rubberBand.left,
-              top: rubberBand.top,
-              width: rubberBand.right - rubberBand.left,
-              height: rubberBand.bottom - rubberBand.top,
-            },
-          ]}
-        />
-      )}
+    <PlacementOverlay page={page} scale={TOUCH_SCALE} onCommit={commitAt}>
       <Pressable
+        testID={TEST_IDS.panel}
         style={[styles.panel, {width: PANEL_WIDTH}]}
         onPress={e => e.stopPropagation()}>
         <View style={styles.headerRow}>
@@ -920,7 +840,7 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
           </Text>
         </View>
       </Pressable>
-    </View>
+    </PlacementOverlay>
   );
 }
 
@@ -981,27 +901,6 @@ function ShapeGrid({shapes, selectedId, onSelect}: ShapeGridProps) {
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    flexDirection: 'row',
-    // `alignItems` is the cross axis for a row flex container, so this
-    // vertically centers the panel inside the full-page overlay. Prior
-    // to 2026-04-20 the panel was pinned near the top (`top: '2%'`,
-    // `alignItems: 'flex-start'`) which looked correct on Nomad but
-    // stranded the panel well above the puzzle-piece plugin icon on
-    // Manta. Centering gets us close to the icon's Y on both form
-    // factors without the SDK needing to expose the button rect.
-    alignItems: 'center',
-    backgroundColor: 'transparent',
-  },
-  // Drag feedback only — insertion never reads this view. Dashed + thin
-  // so partial e-ink refreshes stay cheap; drop it if it ghosts.
-  rubberBand: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: '#000000',
-  },
   panel: {
     // Horizontally anchored alongside the left toolbar so it reads as
     // "attached to" the Plugins icon rather than floating in space.

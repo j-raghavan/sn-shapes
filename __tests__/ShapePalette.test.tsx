@@ -41,6 +41,8 @@ import {
   createMemoryFavoritesStorage,
 } from '../src/favoritesStorage';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
+import {DRAG_THRESHOLD_PX} from '../src/placement';
+import {RUBBER_BAND_THROTTLE_MS} from '../src/PlacementOverlay';
 import {
   PluginCommAPI,
   PluginFileAPI,
@@ -941,9 +943,7 @@ describe('ShapePalette (merged popup)', () => {
 
   it('tapping inside the panel does not propagate to the overlay (stopPropagation)', async () => {
     const tree = await mountPalette();
-    // The overlay is a responder View (issue #15), so the panel is now
-    // the first Pressable in the tree.
-    const panelPressable = tree.root.findAllByType(Pressable)[0];
+    const panelPressable = findByTestID(tree, TEST_IDS.panel);
     const stopPropagation = jest.fn();
     act(() => {
       panelPressable.props.onPress({stopPropagation});
@@ -1172,7 +1172,6 @@ describe('ShapePalette (merged popup)', () => {
 
     it('AC2.1: a tap inserts the default-size shape centred on the pen-down point', async () => {
       const tree = await mountPalette();
-      expect(SCALE).toBeGreaterThan(0);
       await pressInsert(tree, {x: 400, y: 600});
       const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
       expect(geo.showLassoAfterInsert).toBe(true);
@@ -1215,8 +1214,9 @@ describe('ShapePalette (merged popup)', () => {
       expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
       act(() => { o.onResponderGrant(touchEvent({x: 100, y: 100})); });
       expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
-      // Below threshold: still hidden.
-      act(() => { o.onResponderMove(touchEvent({x: 105, y: 105})); });
+      // Below threshold (half of it, in dp): still hidden.
+      const sub = DRAG_THRESHOLD_PX / SCALE / 2;
+      act(() => { o.onResponderMove(touchEvent({x: 100 + sub, y: 100 + sub})); });
       expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
       // Beyond threshold: visible, normalised to the swept box in dp.
       act(() => { o.onResponderMove(touchEvent({x: 50, y: 300})); });
@@ -1225,8 +1225,10 @@ describe('ShapePalette (merged popup)', () => {
       const flat = Object.assign({}, ...[band.props.style].flat());
       expect(flat).toMatchObject({left: 50, top: 100, width: 50, height: 200});
       // Wandering back inside the threshold hides it again.
-      act(() => { o.onResponderMove(touchEvent({x: 102, y: 98})); });
+      act(() => { o.onResponderMove(touchEvent({x: 100 + sub, y: 100 - sub})); });
       expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      // Band updates are throttled (fake timers: let the window elapse).
+      jest.advanceTimersByTime(RUBBER_BAND_THROTTLE_MS);
       act(() => { o.onResponderMove(touchEvent({x: 300, y: 300})); });
       expect(findByTestID(tree, TEST_IDS.rubberBand)).toBeTruthy();
       await act(async () => {
@@ -1235,6 +1237,24 @@ describe('ShapePalette (merged popup)', () => {
       });
       expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
       expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(1);
+    });
+
+    it('a failed insert leaves no rubber band rendered', async () => {
+      (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+      const tree = await mountPalette();
+      const o = overlayProps(tree);
+      act(() => {
+        o.onResponderGrant(touchEvent({x: 100, y: 100}));
+        o.onResponderMove(touchEvent({x: 400, y: 400}));
+      });
+      expect(findByTestID(tree, TEST_IDS.rubberBand)).toBeTruthy();
+      await act(async () => {
+        await o.onResponderRelease(touchEvent({x: 400, y: 400}));
+        await flushPromises();
+        await flushPromises();
+      });
+      expect(findByTestID(tree, TEST_IDS.error)).toBeTruthy();
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
     });
 
     it('a move without a prior grant is ignored', async () => {

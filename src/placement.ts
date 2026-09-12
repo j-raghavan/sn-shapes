@@ -79,6 +79,15 @@ function ensureSpan(lo: number, hi: number, minSide: number, limit: number): [nu
 }
 
 /**
+ * The one tap-vs-drag rule (page px), shared by the release handler
+ * that classifies the gesture and the move handler that decides when
+ * the rubber band appears — so the two can never disagree.
+ */
+export function isDragGesture(down: Point, up: Point, threshold = DRAG_THRESHOLD_PX): boolean {
+  return Math.hypot(up.x - down.x, up.y - down.y) >= threshold;
+}
+
+/**
  * Classify a pen-down / pen-up pair (page px) as a tap or a drag and
  * normalise the result onto the page.
  */
@@ -90,7 +99,7 @@ export function resolvePlacementTarget(
 ): PlacementTarget {
   const threshold = opts.threshold ?? DRAG_THRESHOLD_PX;
   const minSide = opts.minSide ?? MIN_DRAG_SIDE_PX;
-  if (Math.hypot(up.x - down.x, up.y - down.y) < threshold) {
+  if (!isDragGesture(down, up, threshold)) {
     return {kind: 'tap', point: clampPoint(down, page)};
   }
   const a = clampPoint(down, page);
@@ -118,12 +127,17 @@ function translateInsidePage(natural: Rect, centre: Point, page: PageSize): Rect
  * scale uniformly to the shorter side so they stay circles; every other
  * type scales per axis, matching what the native lasso handle does.
  * Returns the input unchanged when its bounds cannot be determined.
+ *
+ * Generic in the geometry type: only coordinates change, the type and
+ * every non-coordinate field are preserved, so the caller's richer
+ * geometry type (e.g. the SDK one with `showLassoAfterInsert`) survives.
+ * That is the one cast in this module.
  */
-export function placeGeometry(g: Geometry, target: PlacementTarget, page: PageSize): Geometry {
+export function placeGeometry<G extends Geometry>(g: G, target: PlacementTarget, page: PageSize): G {
   const natural = geometryNaturalBounds(g);
   if (!natural) {return g;}
   if (target.kind === 'tap') {
-    return applyRectTransform(g, natural, translateInsidePage(natural, target.point, page));
+    return applyRectTransform(g, natural, translateInsidePage(natural, target.point, page)) as G;
   }
   const {rect} = target;
   if (g.type === 'GEO_circle') {
@@ -138,5 +152,5 @@ export function placeGeometry(g: Geometry, target: PlacementTarget, page: PageSi
       ellipseMinorAxisRadius: r,
     };
   }
-  return applyRectTransform(g, natural, rect);
+  return applyRectTransform(g, natural, rect) as G;
 }
