@@ -1,7 +1,7 @@
 {
   "name": "SnShapes",
   "version": "1.0.10",
-  "description": "Quickly add beautifully centered shapes to your notes: squares, circles, triangles, polygons, and more. Just tap a shape and it's placed right on the page for you.",
+  "description": "Quickly add shapes to your notes: squares, circles, triangles, polygons, and more. Pick a shape, then tap the page to place it under your pen or drag to draw it at the size you want.",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
