@@ -1,6 +1,6 @@
 {
   "name": "SnShapes",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Quickly add shapes to your notes: squares, circles, triangles, polygons, and more. Pick a shape, then tap the page to place it under your pen or drag to draw it at the size you want.",
   "private": true,
   "scripts": {
