@@ -31,7 +31,10 @@ export type PageSize = {width: number; height: number};
 
 export type PlacementTarget =
   | {kind: 'tap'; point: Point}
-  | {kind: 'drag'; rect: Rect};
+  /** `from`/`to` are the page-clamped pen-down / pen-up points in
+   *  gesture order, so direction-bearing shapes (Line) can follow the
+   *  pen rather than the normalised box. */
+  | {kind: 'drag'; rect: Rect; from: Point; to: Point};
 
 export type PlacementOptions = {threshold?: number; minSide?: number};
 
@@ -99,6 +102,11 @@ export function resolvePlacementTarget(
 ): PlacementTarget {
   const threshold = opts.threshold ?? DRAG_THRESHOLD_PX;
   const minSide = opts.minSide ?? MIN_DRAG_SIDE_PX;
+  // Boundary guard: a malformed touch event (NaN/Infinity) must never
+  // reach geometry. Degrade to the pre-#15 behaviour — a tap at centre.
+  if (![down.x, down.y, up.x, up.y].every(Number.isFinite)) {
+    return {kind: 'tap', point: clampPoint({x: page.width / 2, y: page.height / 2}, page)};
+  }
   if (!isDragGesture(down, up, threshold)) {
     return {kind: 'tap', point: clampPoint(down, page)};
   }
@@ -110,7 +118,7 @@ export function resolvePlacementTarget(
   const [top, bottom] = ensureSpan(
     Math.min(a.y, b.y), Math.max(a.y, b.y), minSide, page.height,
   );
-  return {kind: 'drag', rect: {left, top, right, bottom}};
+  return {kind: 'drag', rect: {left, top, right, bottom}, from: a, to: b};
 }
 
 /** Shift `natural` so it lies within the page; origin-aligned if larger. */
@@ -139,7 +147,12 @@ export function placeGeometry<G extends Geometry>(g: G, target: PlacementTarget,
   if (target.kind === 'tap') {
     return applyRectTransform(g, natural, translateInsidePage(natural, target.point, page)) as G;
   }
-  const {rect} = target;
+  const {rect, from, to} = target;
+  if (g.type === 'straightLine') {
+    // A line has direction; fitting it into the normalised box would
+    // always produce the box's diagonal or midline. Follow the pen.
+    return {...g, points: [{...from}, {...to}]};
+  }
   if (g.type === 'GEO_circle') {
     const r = Math.min(rect.right - rect.left, rect.bottom - rect.top) / 2;
     return {

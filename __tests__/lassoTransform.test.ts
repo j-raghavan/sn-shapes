@@ -303,14 +303,14 @@ describe('applyRectTransform', () => {
     const g: Geometry = {
       type: 'GEO_polygon',
       penColor: 0, penType: 10, penWidth: 400,
-      points: [{x: 1, y: 0}, {x: 1, y: 10}],
+      points: [{x: 0, y: 0}, {x: 0, y: 10}],
     };
     // Zero-width source: x is translated (mid 0 → mid 27.5); y still scales 0..10 → 5..50.
     const degenerate: Rect = {left: 0, top: 0, right: 0, bottom: 10};
     const to: Rect = {left: 5, top: 5, right: 50, bottom: 50};
     const out = applyRectTransform(g, degenerate, to);
     expect(out).not.toBe(g);
-    expect(out.points).toEqual([{x: 28.5, y: 5}, {x: 28.5, y: 50}]);
+    expect(out.points).toEqual([{x: 27.5, y: 5}, {x: 27.5, y: 50}]);
   });
 
   it('translates purely when both source axes are degenerate', () => {

@@ -25,6 +25,16 @@ function expectRectClose(a: Rect | null, b: Rect) {
   expect(a!.bottom).toBeCloseTo(b.bottom, 6);
 }
 
+/** Drag target whose from/to run top-left → bottom-right of `rect`. */
+function drag(rect: Rect) {
+  return {
+    kind: 'drag' as const,
+    rect,
+    from: {x: rect.left, y: rect.top},
+    to: {x: rect.right, y: rect.bottom},
+  };
+}
+
 function buildDefault(id: string): Geometry {
   const shape = SHAPES.find(s => s.id === id)!;
   const params = Object.fromEntries(shape.parameters.map(p => [p.id, p.defaultValue]));
@@ -66,11 +76,20 @@ describe('resolvePlacementTarget (FR1.3)', () => {
     expect(t).toEqual({kind: 'tap', point: {x: 0, y: PAGE.height}});
   });
 
-  it('AC1.6: corner order does not matter', () => {
+  it('AC1.6: corner order does not change the rect; from/to keep gesture order', () => {
     const a = resolvePlacementTarget({x: 100, y: 100}, {x: 300, y: 500}, PAGE);
     const b = resolvePlacementTarget({x: 300, y: 500}, {x: 100, y: 100}, PAGE);
-    expect(a).toEqual(b);
-    expect(a).toEqual({kind: 'drag', rect: {left: 100, top: 100, right: 300, bottom: 500}});
+    const rect = {left: 100, top: 100, right: 300, bottom: 500};
+    expect(a).toEqual({kind: 'drag', rect, from: {x: 100, y: 100}, to: {x: 300, y: 500}});
+    expect(b).toEqual({kind: 'drag', rect, from: {x: 300, y: 500}, to: {x: 100, y: 100}});
+  });
+
+  it('non-finite coordinates degrade to a tap at the page centre', () => {
+    const centre = {kind: 'tap', point: {x: PAGE.width / 2, y: PAGE.height / 2}};
+    expect(resolvePlacementTarget({x: NaN, y: 10}, {x: 10, y: 10}, PAGE)).toEqual(centre);
+    expect(resolvePlacementTarget({x: 10, y: Infinity}, {x: 10, y: 10}, PAGE)).toEqual(centre);
+    expect(resolvePlacementTarget({x: 10, y: 10}, {x: -Infinity, y: 10}, PAGE)).toEqual(centre);
+    expect(resolvePlacementTarget({x: 10, y: 10}, {x: 10, y: NaN}, PAGE)).toEqual(centre);
   });
 
   it('AC1.7: a purely horizontal 200 px drag gets MIN_DRAG_SIDE_PX height around its row', () => {
@@ -78,6 +97,8 @@ describe('resolvePlacementTarget (FR1.3)', () => {
     expect(t).toEqual({
       kind: 'drag',
       rect: {left: 100, right: 300, top: 400 - MIN_DRAG_SIDE_PX / 2, bottom: 400 + MIN_DRAG_SIDE_PX / 2},
+      from: {x: 100, y: 400},
+      to: {x: 300, y: 400},
     });
   });
 
@@ -92,12 +113,15 @@ describe('resolvePlacementTarget (FR1.3)', () => {
 
   it('AC1.8: a drag partly off-page is clamped to the page', () => {
     const t = resolvePlacementTarget({x: -50, y: -50}, {x: 200, y: 300}, PAGE);
-    expect(t).toEqual({kind: 'drag', rect: {left: 0, top: 0, right: 200, bottom: 300}});
+    expect(t).toEqual({
+      kind: 'drag', rect: {left: 0, top: 0, right: 200, bottom: 300},
+      from: {x: 0, y: 0}, to: {x: 200, y: 300},
+    });
   });
 
   it('AC1.8: a drag entirely off-page collapses to the page edge with minSide sides, shifted inward', () => {
     const t = resolvePlacementTarget({x: -100, y: 2000}, {x: -20, y: 2100}, PAGE);
-    expect(t).toEqual({
+    expect(t).toMatchObject({
       kind: 'drag',
       rect: {
         left: 0,
@@ -105,24 +129,26 @@ describe('resolvePlacementTarget (FR1.3)', () => {
         top: PAGE.height - MIN_DRAG_SIDE_PX,
         bottom: PAGE.height,
       },
+      from: {x: 0, y: PAGE.height},
+      to: {x: 0, y: PAGE.height},
     });
   });
 
   it('shifts inward rather than truncating when the floor crosses the origin', () => {
     // Vertical 200 px drag hugging x=0: width floor would extend to x=-8.
     const t = resolvePlacementTarget({x: 0, y: 100}, {x: 0, y: 300}, PAGE);
-    expect(t).toEqual({kind: 'drag', rect: {left: 0, right: MIN_DRAG_SIDE_PX, top: 100, bottom: 300}});
+    expect(t).toMatchObject({kind: 'drag', rect: {left: 0, right: MIN_DRAG_SIDE_PX, top: 100, bottom: 300}});
   });
 
   it('never returns a negative edge on a page smaller than minSide', () => {
     const tiny: PageSize = {width: 4, height: 4};
     const t = resolvePlacementTarget({x: 0, y: 0}, {x: 4, y: 4}, tiny, {threshold: 1});
-    expect(t).toEqual({kind: 'drag', rect: {left: 0, top: 0, right: 4, bottom: 4}});
+    expect(t).toMatchObject({kind: 'drag', rect: {left: 0, top: 0, right: 4, bottom: 4}});
   });
 
   it('honours explicit threshold and minSide options', () => {
     const t = resolvePlacementTarget({x: 10, y: 10}, {x: 14, y: 10}, PAGE, {threshold: 2, minSide: 40});
-    expect(t).toEqual({kind: 'drag', rect: {left: 0, right: 40, top: 0, bottom: 40}});
+    expect(t).toMatchObject({kind: 'drag', rect: {left: 0, right: 40, top: 0, bottom: 40}});
   });
 
   it('exports the documented defaults', () => {
@@ -175,25 +201,41 @@ describe('placeGeometry — drag (FR1.5)', () => {
   it('AC1.2: rectangle fitted into a 100×400 rect spans exactly that rect', () => {
     const g = buildDefault('rectangle');
     const rect: Rect = {left: 50, top: 60, right: 150, bottom: 460};
-    const out = placeGeometry(g, {kind: 'drag', rect}, PAGE);
+    const out = placeGeometry(g, drag(rect), PAGE);
     expectRectClose(geometryNaturalBounds(out), rect);
     expect(out.points).toHaveLength(g.points!.length);
   });
 
-  it('AC1.1: horizontal line fitted into 300×100 spans left→right on the vertical midline', () => {
+  it('AC1.1/AC1.9: a dragged line runs from pen-down to pen-up (vertical)', () => {
     const g = buildDefault('line');
-    const rect: Rect = {left: 100, top: 200, right: 400, bottom: 300};
-    const out = placeGeometry(g, {kind: 'drag', rect}, PAGE);
-    const xs = out.points!.map(p => p.x).sort((a, b) => a - b);
-    expect(xs[0]).toBeCloseTo(100, 6);
-    expect(xs[1]).toBeCloseTo(400, 6);
-    for (const p of out.points!) {expect(p.y).toBeCloseTo(250, 6);}
+    const out = placeGeometry(
+      g, resolvePlacementTarget({x: 100, y: 100}, {x: 100, y: 500}, PAGE), PAGE,
+    );
+    expect(out.type).toBe('straightLine');
+    expect(out.points).toEqual([{x: 100, y: 100}, {x: 100, y: 500}]);
+    expect(out.penWidth).toBe(g.penWidth);
+  });
+
+  it('AC1.9: reverse gesture order is preserved for a line', () => {
+    const g = buildDefault('line');
+    const out = placeGeometry(
+      g, resolvePlacementTarget({x: 100, y: 500}, {x: 100, y: 100}, PAGE), PAGE,
+    );
+    expect(out.points).toEqual([{x: 100, y: 500}, {x: 100, y: 100}]);
+  });
+
+  it('AC1.9: a diagonal drag yields a diagonal line, not a box midline', () => {
+    const g = buildDefault('line');
+    const out = placeGeometry(
+      g, resolvePlacementTarget({x: 100, y: 200}, {x: 400, y: 300}, PAGE), PAGE,
+    );
+    expect(out.points).toEqual([{x: 100, y: 200}, {x: 400, y: 300}]);
   });
 
   it('AC1.3: circle fitted into 300×100 becomes r=50 at the rect centre, angle preserved', () => {
     const g = {...buildDefault('circle'), ellipseAngle: 30};
     const rect: Rect = {left: 100, top: 200, right: 400, bottom: 300};
-    const out = placeGeometry(g, {kind: 'drag', rect}, PAGE);
+    const out = placeGeometry(g, drag(rect), PAGE);
     expect(out.type).toBe('GEO_circle');
     expect(out.ellipseCenterPoint).toEqual({x: 250, y: 250});
     expect(out.ellipseMajorAxisRadius).toBe(50);
@@ -204,7 +246,7 @@ describe('placeGeometry — drag (FR1.5)', () => {
   it('an ellipse scales per axis (not forced circular)', () => {
     const g = buildDefault('ellipse');
     const rect: Rect = {left: 0, top: 0, right: 400, bottom: 100};
-    const out = placeGeometry(g, {kind: 'drag', rect}, PAGE);
+    const out = placeGeometry(g, drag(rect), PAGE);
     expect(out.type).toBe('GEO_ellipse');
     expectRectClose(geometryNaturalBounds(out), rect);
   });
@@ -213,13 +255,13 @@ describe('placeGeometry — drag (FR1.5)', () => {
     const g: Geometry = {type: 'GEO_mystery', penColor: 0, penType: 10, penWidth: 500};
     const frozen = Object.freeze({...g});
     expect(placeGeometry(frozen, {kind: 'tap', point: {x: 1, y: 1}}, PAGE)).toBe(frozen);
-    expect(placeGeometry(frozen, {kind: 'drag', rect: {left: 0, top: 0, right: 10, bottom: 10}}, PAGE)).toBe(frozen);
+    expect(placeGeometry(frozen, drag({left: 0, top: 0, right: 10, bottom: 10}), PAGE)).toBe(frozen);
   });
 
   it('FR1.6: inputs are not mutated on the happy path', () => {
     const g = buildDefault('rectangle');
     const snapshot = JSON.stringify(g);
-    placeGeometry(g, {kind: 'drag', rect: {left: 0, top: 0, right: 10, bottom: 10}}, PAGE);
+    placeGeometry(g, drag({left: 0, top: 0, right: 10, bottom: 10}), PAGE);
     placeGeometry(g, {kind: 'tap', point: {x: 5, y: 5}}, PAGE);
     expect(JSON.stringify(g)).toBe(snapshot);
   });
