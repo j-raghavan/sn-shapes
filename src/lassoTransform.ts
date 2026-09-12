@@ -140,7 +140,8 @@ function rectHeight(r: Rect): number {
  * Linearly re-map a geometry's coordinates from `fromRect` to `toRect`.
  *
  * Preserves geometry type and all non-coordinate fields (pen style, angle,
- * extras). Returns a new object; does not mutate input.
+ * extras). Returns a new object; does not mutate input. A degenerate axis
+ * of `fromRect` (zero width or height) is translated rather than scaled.
  *
  * For rotated ellipses we can't perfectly represent a non-uniform scale
  * (the result would be a sheared ellipse, which the firmware can't store).
@@ -152,14 +153,21 @@ function rectHeight(r: Rect): number {
 export function applyRectTransform(g: Geometry, fromRect: Rect, toRect: Rect): Geometry {
   const fw = rectWidth(fromRect);
   const fh = rectHeight(fromRect);
-  if (Math.abs(fw) < EPSILON || Math.abs(fh) < EPSILON) {
-    // Degenerate source rect — cannot scale. Return input unchanged.
-    return g;
-  }
-  const sx = rectWidth(toRect) / fw;
-  const sy = rectHeight(toRect) / fh;
-  const mapX = (x: number) => toRect.left + (x - fromRect.left) * sx;
-  const mapY = (y: number) => toRect.top + (y - fromRect.top) * sy;
+  // A degenerate source axis (e.g. the horizontal Line shape has zero
+  // height) cannot be scaled, but it can still be *moved*: map the axis
+  // midpoint of `fromRect` onto the midpoint of `toRect`. Without this,
+  // tap-to-place / drag-to-size would silently leave a Line at its
+  // build-time position. The non-degenerate axis keeps its linear remap.
+  const degenerateX = Math.abs(fw) < EPSILON;
+  const degenerateY = Math.abs(fh) < EPSILON;
+  const sx = degenerateX ? 1 : rectWidth(toRect) / fw;
+  const sy = degenerateY ? 1 : rectHeight(toRect) / fh;
+  const mapX = degenerateX
+    ? (x: number) => x + (toRect.left + toRect.right - fromRect.left - fromRect.right) / 2
+    : (x: number) => toRect.left + (x - fromRect.left) * sx;
+  const mapY = degenerateY
+    ? (y: number) => y + (toRect.top + toRect.bottom - fromRect.top - fromRect.bottom) / 2
+    : (y: number) => toRect.top + (y - fromRect.top) * sy;
 
   switch (g.type) {
     case 'GEO_circle':
@@ -216,8 +224,7 @@ export function applyRectTransform(g: Geometry, fromRect: Rect, toRect: Rect): G
  *   - the lasso rect is null,
  *   - the geometry type is unknown,
  *   - the lasso rect matches the natural bounds within tolerance
- *     (no user resize detected), or
- *   - either rect is degenerate.
+ *     (no user resize detected).
  */
 export function bakeLassoResize(g: Geometry, lassoRect: Rect | null, tol?: number): Geometry {
   if (!lassoRect) {return g;}
