@@ -3,7 +3,7 @@
 - Status: accepted (approved by owner 2026-09-12; implemented on `fix/issue-15-pen-placement`)
 - Date: 2026-09-12
 - Deciders: SnShapes (owner: J-Raghavan)
-- Spec: `spec/SPEC-PEN-PLACEMENT.md` (F1–F3)
+- Spec: `spec/SPEC-PEN-PLACEMENT.md` (F1–F3) (local, uncommitted per repo convention: spec/ is gitignored)
 - Issue: #15 (pierrewjohnson) — "Minor functional choices differences"
 
 ## Context and Problem Statement
@@ -52,16 +52,20 @@ what the native lasso does, so it matches the user's mental model). `GEO_circle`
 uniformly to the shorter side and is centred in the box so a circle stays a circle.
 `applyRectTransform` is extended (additively, default-compatible) so a degenerate source
 axis (the horizontal Line has zero height) is translated instead of leaving the geometry
-unchanged.
+unchanged. A dragged `straightLine` does not use the box at all: its points become the
+clamped pen-down and pen-up points in gesture order (`from`/`to` on the drag target), so a
+line follows the pen rather than a box diagonal or midline.
 
 **D4 — Bounds.** The drag rect is normalised (any corner order) and clamped to the page
 before fitting; each side is floored at `MIN_DRAG_SIDE_PX` around its own midpoint. A tap
 placement is translated so the shape's natural bounds stay inside the page; a shape larger
 than the page is aligned to the page origin.
 
-**D5 — Rubber band.** During a drag a dashed, non-interactive `View` outlines the box in
-overlay dp coordinates. It is feedback only; the insertion logic does not depend on it, so
-it can be removed if it ghosts on e-ink without touching D1–D4.
+**D5 — Rubber band.** During a drag a 2 px solid black, non-interactive `View` outlines the
+box in overlay dp coordinates (solid, not dashed: e-ink partial refresh drops dash
+segments). Updates are throttled to one per ~40 ms; the release path clears the band
+unconditionally. It is feedback only; the insertion logic does not depend on it, so it can
+be removed if it ghosts on e-ink without touching D1–D4.
 
 **D6 — Responder, not Pressable.** The overlay uses the React Native gesture responder
 props (`onStartShouldSetResponder`, `onResponderGrant/Move/Release/Terminate`) because
