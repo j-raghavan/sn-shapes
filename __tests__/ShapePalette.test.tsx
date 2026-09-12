@@ -1,6 +1,6 @@
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
-import {Pressable, Text} from 'react-native';
+import {PixelRatio, Pressable, Text} from 'react-native';
 
 jest.mock('sn-plugin-lib', () => {
   return {
@@ -41,6 +41,8 @@ import {
   createMemoryFavoritesStorage,
 } from '../src/favoritesStorage';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
+import {DRAG_THRESHOLD_PX} from '../src/placement';
+import {RUBBER_BAND_THROTTLE_MS} from '../src/PlacementOverlay';
 import {
   PluginCommAPI,
   PluginFileAPI,
@@ -70,6 +72,8 @@ function findAllCells(tree: ReactTestRenderer) {
 
 let consoleErrorSpy: jest.SpyInstance;
 let consoleWarnSpy: jest.SpyInstance;
+// insertShape logs the firmware verdict for logcat; keep jest output clean.
+let consoleLogSpy: jest.SpyInstance;
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -80,12 +84,14 @@ beforeEach(() => {
   (PluginManager.closePluginView as jest.Mock).mockClear();
   consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
   jest.useRealTimers();
   consoleErrorSpy.mockRestore();
   consoleWarnSpy.mockRestore();
+  consoleLogSpy.mockRestore();
 });
 
 // Helper: render the palette and let mount-time async work settle.
@@ -106,13 +112,36 @@ async function mountPalette(storage?: FavoritesStorage) {
   return tree!;
 }
 
-// Helper: tap outside the panel — the overlay press is the new
+// Overlay gesture helpers (issue #15). The overlay is a responder View:
+// pen-down (grant) + pen-up (release) at the same point is a tap; a
+// release far from the grant is a drag. Events carry root-relative dp.
+type Pt = {x: number; y: number};
+const TAP_POINT: Pt = {x: 702, y: 936};
+// ShapePalette captures PixelRatio.get() at module load (TOUCH_SCALE);
+// under the jest react-native preset that is 2. Expectations below are
+// written in terms of it so they hold whatever the preset reports.
+const SCALE = PixelRatio.get();
+const px = (v: number) => v * SCALE;
+function touchEvent(p: Pt) {
+  return {nativeEvent: {pageX: p.x, pageY: p.y}};
+}
+function overlayProps(tree: ReactTestRenderer) {
+  return findByTestID(tree, TEST_IDS.overlay).props;
+}
+// Synchronous grant+release, for tests that want the insert in flight.
+function tapOverlay(tree: ReactTestRenderer, down: Pt = TAP_POINT, up: Pt = down) {
+  const o = overlayProps(tree);
+  o.onResponderGrant(touchEvent(down));
+  return o.onResponderRelease(touchEvent(up));
+}
+
+// Helper: pen down + up outside the panel — the overlay gesture is the
 // commit-and-close affordance (the explicit Insert button was dropped
-// 2026-04-18). The overlay onPress is async (awaits insertShape) so we
+// 2026-04-18). The release handler is async (awaits insertShape) so we
 // flush a few microtask ticks to let the promise chain settle.
-async function pressInsert(tree: ReactTestRenderer) {
+async function pressInsert(tree: ReactTestRenderer, down: Pt = TAP_POINT, up: Pt = down) {
   await act(async () => {
-    await findByTestID(tree, TEST_IDS.overlay).props.onPress();
+    await tapOverlay(tree, down, up);
     await flushPromises();
     await flushPromises();
     await flushPromises();
@@ -451,7 +480,12 @@ describe('ShapePalette (merged popup)', () => {
   // -------------------------------------------------------------------------
   // Page-context resolution
   // -------------------------------------------------------------------------
-  it('centers the inserted shape on the resolved page size', async () => {
+  // A tap far past the right edge is clamped so the shape's right edge
+  // lands exactly on the resolved page width — which is how we prove the
+  // resolved size (not the default) drove placement.
+  const FAR_RIGHT = {x: 100000, y: 936};
+
+  it('clamps the inserted shape to the resolved page size', async () => {
     (PluginCommAPI.getCurrentFilePath as jest.Mock).mockResolvedValueOnce({
       success: true,
       result: '/note/my.note',
@@ -465,13 +499,11 @@ describe('ShapePalette (merged popup)', () => {
       result: {width: 1920, height: 2560},
     });
     const tree = await mountPalette();
-    await pressInsert(tree);
+    await pressInsert(tree, FAR_RIGHT);
     expect(PluginFileAPI.getPageSize).toHaveBeenCalledWith('/note/my.note', 3);
     const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
     const xs = geo.points.map((p: {x: number}) => p.x);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    expect((minX + maxX) / 2).toBeCloseTo(1920 / 2, -1);
+    expect(Math.max(...xs)).toBeCloseTo(1920, 6);
   });
 
   it('falls back to default page width when getCurrentFilePath fails', async () => {
@@ -479,14 +511,11 @@ describe('ShapePalette (merged popup)', () => {
       new Error('unavailable'),
     );
     const tree = await mountPalette();
-    await pressInsert(tree);
+    await pressInsert(tree, FAR_RIGHT);
     expect(PluginFileAPI.getPageSize).not.toHaveBeenCalled();
     const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
     const xs = geo.points.map((p: {x: number}) => p.x);
-    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(
-      DEFAULT_PAGE_WIDTH / 2,
-      -1,
-    );
+    expect(Math.max(...xs)).toBeCloseTo(DEFAULT_PAGE_WIDTH, 6);
   });
 
   it('falls back to default page width when getPageSize fails', async () => {
@@ -494,13 +523,10 @@ describe('ShapePalette (merged popup)', () => {
       new Error('unavailable'),
     );
     const tree = await mountPalette();
-    await pressInsert(tree);
+    await pressInsert(tree, FAR_RIGHT);
     const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
     const xs = geo.points.map((p: {x: number}) => p.x);
-    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(
-      DEFAULT_PAGE_WIDTH / 2,
-      -1,
-    );
+    expect(Math.max(...xs)).toBeCloseTo(DEFAULT_PAGE_WIDTH, 6);
   });
 
   it('falls back to default page width when getCurrentFilePath resolves unsuccessfully (not rejected)', async () => {
@@ -509,14 +535,11 @@ describe('ShapePalette (merged popup)', () => {
       error: {message: 'no file open'},
     });
     const tree = await mountPalette();
-    await pressInsert(tree);
+    await pressInsert(tree, FAR_RIGHT);
     expect(PluginFileAPI.getPageSize).not.toHaveBeenCalled();
     const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
     const xs = geo.points.map((p: {x: number}) => p.x);
-    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(
-      DEFAULT_PAGE_WIDTH / 2,
-      -1,
-    );
+    expect(Math.max(...xs)).toBeCloseTo(DEFAULT_PAGE_WIDTH, 6);
   });
 
   it('falls back to default page width when getPageSize resolves unsuccessfully (not rejected)', async () => {
@@ -525,13 +548,10 @@ describe('ShapePalette (merged popup)', () => {
       error: {message: 'bad page'},
     });
     const tree = await mountPalette();
-    await pressInsert(tree);
+    await pressInsert(tree, FAR_RIGHT);
     const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
     const xs = geo.points.map((p: {x: number}) => p.x);
-    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(
-      DEFAULT_PAGE_WIDTH / 2,
-      -1,
-    );
+    expect(Math.max(...xs)).toBeCloseTo(DEFAULT_PAGE_WIDTH, 6);
   });
 
   // -------------------------------------------------------------------------
@@ -650,7 +670,7 @@ describe('ShapePalette (merged popup)', () => {
     const tree = await mountPalette();
 
     act(() => {
-      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+      tapOverlay(tree);
     });
     await act(async () => {
       await flushPromises();
@@ -898,14 +918,14 @@ describe('ShapePalette (merged popup)', () => {
 
     // First overlay tap starts an in-flight insert.
     act(() => {
-      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+      tapOverlay(tree);
     });
     await act(async () => {
       await flushPromises();
     });
     // Second tap while pending — should be ignored.
     await act(async () => {
-      findByTestID(tree, TEST_IDS.overlay).props.onPress();
+      tapOverlay(tree);
       await flushPromises();
     });
     expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(1);
@@ -923,7 +943,7 @@ describe('ShapePalette (merged popup)', () => {
 
   it('tapping inside the panel does not propagate to the overlay (stopPropagation)', async () => {
     const tree = await mountPalette();
-    const panelPressable = tree.root.findAllByType(Pressable)[1];
+    const panelPressable = findByTestID(tree, TEST_IDS.panel);
     const stopPropagation = jest.fn();
     act(() => {
       panelPressable.props.onPress({stopPropagation});
@@ -1048,7 +1068,7 @@ describe('ShapePalette (merged popup)', () => {
       () => new Promise<void>(r => { resolveInsert = r; }),
     );
     const tree = await mountPalette();
-    act(() => { findByTestID(tree, TEST_IDS.overlay).props.onPress(); });
+    act(() => { tapOverlay(tree); });
     await act(async () => { await flushPromises(); });
     await act(async () => {
       findByTestID(tree, TEST_IDS.cell('circle')).props.onPress();
@@ -1068,7 +1088,7 @@ describe('ShapePalette (merged popup)', () => {
       () => new Promise<void>(r => { resolveInsert = r; }),
     );
     const tree = await mountPalette();
-    act(() => { findByTestID(tree, TEST_IDS.overlay).props.onPress(); });
+    act(() => { tapOverlay(tree); });
     await act(async () => { await flushPromises(); });
     await act(async () => {
       findByTestID(tree, TEST_IDS.widthButton(900)).props.onPress();
@@ -1090,7 +1110,7 @@ describe('ShapePalette (merged popup)', () => {
       () => new Promise<void>(r => { resolveInsert = r; }),
     );
     const tree = await mountPalette();
-    act(() => { findByTestID(tree, TEST_IDS.overlay).props.onPress(); });
+    act(() => { tapOverlay(tree); });
     await act(async () => { await flushPromises(); });
     await act(async () => {
       findByTestID(tree, TEST_IDS.favoriteToggle).props.onPress();
@@ -1135,6 +1155,179 @@ describe('ShapePalette (merged popup)', () => {
     expect(withFunctionStyle.length).toBeGreaterThan(0);
     withFunctionStyle.forEach(p => {
       expect(() => p.props.style({pressed: true})).not.toThrow();
+    });
+  });
+  // -------------------------------------------------------------------------
+  // Pen placement — tap to place, drag to size (issue #15, F2)
+  // -------------------------------------------------------------------------
+  describe('pen placement', () => {
+    function boundsOf(geo: {points: {x: number; y: number}[]}) {
+      const xs = geo.points.map(p => p.x);
+      const ys = geo.points.map(p => p.y);
+      return {
+        left: Math.min(...xs), right: Math.max(...xs),
+        top: Math.min(...ys), bottom: Math.max(...ys),
+      };
+    }
+
+    it('AC2.1: a tap inserts the default-size shape centred on the pen-down point', async () => {
+      const tree = await mountPalette();
+      await pressInsert(tree, {x: 400, y: 600});
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(geo.showLassoAfterInsert).toBe(true);
+      expect(boundsOf(geo)).toEqual({
+        left: px(400) - 100, right: px(400) + 100, top: px(600) - 100, bottom: px(600) + 100,
+      });
+    });
+
+    it('AC2.2: a drag fits the rectangle into exactly the swept box', async () => {
+      const tree = await mountPalette();
+      await pressInsert(tree, {x: 100, y: 100}, {x: 300, y: 500});
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(boundsOf(geo)).toEqual({left: px(100), right: px(300), top: px(100), bottom: px(500)});
+    });
+
+    it('a drag entered bottom-right → top-left yields the same box', async () => {
+      const tree = await mountPalette();
+      await pressInsert(tree, {x: 300, y: 500}, {x: 100, y: 100});
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(boundsOf(geo)).toEqual({left: px(100), right: px(300), top: px(100), bottom: px(500)});
+    });
+
+    it('a release without a prior grant still commits at the release point', async () => {
+      // Defensive: RN never fires release without grant, but the handler
+      // must not throw or insert NaN geometry if it ever does.
+      const tree = await mountPalette();
+      await act(async () => {
+        await overlayProps(tree).onResponderRelease(touchEvent({x: 400, y: 600}));
+        await flushPromises();
+      });
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(boundsOf(geo)).toEqual({
+        left: px(400) - 100, right: px(400) + 100, top: px(600) - 100, bottom: px(600) + 100,
+      });
+    });
+
+    it('AC2.4: rubber band appears only while dragging beyond the threshold', async () => {
+      const tree = await mountPalette();
+      const o = overlayProps(tree);
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      act(() => { o.onResponderGrant(touchEvent({x: 100, y: 100})); });
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      // Below threshold (half of it, in dp): still hidden.
+      const sub = DRAG_THRESHOLD_PX / SCALE / 2;
+      act(() => { o.onResponderMove(touchEvent({x: 100 + sub, y: 100 + sub})); });
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      // Beyond threshold: visible, normalised to the swept box in dp.
+      act(() => { o.onResponderMove(touchEvent({x: 50, y: 300})); });
+      const band = findByTestID(tree, TEST_IDS.rubberBand);
+      expect(band.props.pointerEvents).toBe('none');
+      const flat = Object.assign({}, ...[band.props.style].flat());
+      expect(flat).toMatchObject({left: 50, top: 100, width: 50, height: 200});
+      // Wandering back inside the threshold hides it again.
+      act(() => { o.onResponderMove(touchEvent({x: 100 + sub, y: 100 - sub})); });
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      // Band updates are throttled (fake timers: let the window elapse).
+      jest.advanceTimersByTime(RUBBER_BAND_THROTTLE_MS);
+      act(() => { o.onResponderMove(touchEvent({x: 300, y: 300})); });
+      expect(findByTestID(tree, TEST_IDS.rubberBand)).toBeTruthy();
+      await act(async () => {
+        await o.onResponderRelease(touchEvent({x: 300, y: 300}));
+        await flushPromises();
+      });
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      expect(PluginCommAPI.insertGeometry).toHaveBeenCalledTimes(1);
+    });
+
+    it('a failed insert leaves no rubber band rendered', async () => {
+      (PluginCommAPI.insertGeometry as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+      const tree = await mountPalette();
+      const o = overlayProps(tree);
+      act(() => {
+        o.onResponderGrant(touchEvent({x: 100, y: 100}));
+        o.onResponderMove(touchEvent({x: 400, y: 400}));
+      });
+      expect(findByTestID(tree, TEST_IDS.rubberBand)).toBeTruthy();
+      await act(async () => {
+        await o.onResponderRelease(touchEvent({x: 400, y: 400}));
+        await flushPromises();
+        await flushPromises();
+      });
+      expect(findByTestID(tree, TEST_IDS.error)).toBeTruthy();
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+    });
+
+    it('a move without a prior grant is ignored', async () => {
+      const tree = await mountPalette();
+      act(() => { overlayProps(tree).onResponderMove(touchEvent({x: 900, y: 900})); });
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+    });
+
+    it('AC2.5: a terminated gesture clears the rubber band and never inserts', async () => {
+      const tree = await mountPalette();
+      const o = overlayProps(tree);
+      act(() => {
+        o.onResponderGrant(touchEvent({x: 100, y: 100}));
+        o.onResponderMove(touchEvent({x: 400, y: 400}));
+      });
+      expect(findByTestID(tree, TEST_IDS.rubberBand)).toBeTruthy();
+      act(() => { o.onResponderTerminate(); });
+      expect(() => findByTestID(tree, TEST_IDS.rubberBand)).toThrow();
+      await act(async () => { await flushPromises(); });
+      expect(PluginCommAPI.insertGeometry).not.toHaveBeenCalled();
+    });
+
+    it('the overlay claims responder status for touches outside the panel', async () => {
+      const tree = await mountPalette();
+      expect(overlayProps(tree).onStartShouldSetResponder()).toBe(true);
+    });
+
+    it('logs the insertGeometry verdict for logcat diagnosis', async () => {
+      const tree = await mountPalette();
+      await pressInsert(tree, {x: 100, y: 100}, {x: 300, y: 500});
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        '[SHAPES] insertGeometry', 'drag', JSON.stringify({success: true}),
+      );
+    });
+
+    it('shows the tap-or-drag hint in the footer', async () => {
+      const tree = await mountPalette();
+      expect(findByTestID(tree, TEST_IDS.footer).props.children).toBe(
+        'Tap the page to place, or drag to draw a box.',
+      );
+    });
+
+    it('AC2.3: touch dp are scaled by PixelRatio into page px', async () => {
+      // TOUCH_SCALE is read once at module load, so the module must be
+      // re-required with PixelRatio mocked. Everything React-related is
+      // required inside the same isolated registry to avoid two Reacts.
+      let insertMock: jest.Mock | undefined;
+      let bounds: ReturnType<typeof boundsOf> | undefined;
+      await jest.isolateModulesAsync(async () => {
+        const RN = require('react-native');
+        jest.spyOn(RN.PixelRatio, 'get').mockReturnValue(3);
+        const IsoReact = require('react');
+        const {create: isoCreate, act: isoAct} = require('react-test-renderer');
+        const {PluginCommAPI: IsoComm} = require('sn-plugin-lib');
+        const {default: IsoPalette, TEST_IDS: ISO_IDS} = require('../src/ShapePalette');
+        insertMock = IsoComm.insertGeometry as jest.Mock;
+        insertMock!.mockClear();
+        let tree: ReactTestRenderer;
+        isoAct(() => {
+          tree = isoCreate(
+            IsoReact.createElement(IsoPalette, {storage: createMemoryFavoritesStorage()}),
+          );
+        });
+        await isoAct(async () => { await flushPromises(); await flushPromises(); });
+        const o = tree!.root.findByProps({testID: ISO_IDS.overlay}).props;
+        await isoAct(async () => {
+          o.onResponderGrant(touchEvent({x: 100, y: 100}));
+          await o.onResponderRelease(touchEvent({x: 300, y: 500}));
+          await flushPromises();
+        });
+        bounds = boundsOf(insertMock!.mock.calls[0][0]);
+      });
+      expect(bounds).toEqual({left: 300, right: 900, top: 300, bottom: 1500});
     });
   });
 });

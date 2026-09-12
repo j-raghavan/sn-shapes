@@ -38,7 +38,7 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 2. Tap the **Plugins** icon in the left toolbar (the puzzle piece).
 3. Tap **Shapes** to open the popup.
 4. Tap a shape in the grid to select it, then tune **Stroke Width** (XS / S / M / L / XL) and **Stroke Color** using the pickers below. The live preview updates as you go.
-5. Tap **anywhere outside the popup** to commit. The shape is inserted centered on the current page and auto-lassoed so you can reposition or resize it straight away.
+5. Put the pen down **anywhere outside the popup** to commit. A **tap** inserts the shape at its default size centred under the pen tip; a **drag** draws a box (an outline follows the pen) and the shape is fitted into it at the stroke width you picked (resizing later with the lasso handle scales the stroke, so draw the box at the size you want). Circles keep their proportions and use the shorter side of the box; a dragged Line runs from pen-down to pen-up. Either way the shape is auto-lassoed so you can still reposition it straight away.
 6. To dismiss without inserting, tap the ✕ in the popup header.
 
 ## Building

@@ -299,15 +299,36 @@ describe('applyRectTransform', () => {
     expect(applyRectTransform(g, from, to)).toBe(g);
   });
 
-  it('returns input unchanged when source rect is degenerate', () => {
+  it('translates a degenerate source axis to the target midpoint and scales the other', () => {
     const g: Geometry = {
       type: 'GEO_polygon',
       penColor: 0, penType: 10, penWidth: 400,
-      points: [{x: 1, y: 1}],
+      points: [{x: 0, y: 0}, {x: 0, y: 10}],
     };
+    // Zero-width source: x is translated (mid 0 → mid 27.5); y still scales 0..10 → 5..50.
     const degenerate: Rect = {left: 0, top: 0, right: 0, bottom: 10};
     const to: Rect = {left: 5, top: 5, right: 50, bottom: 50};
-    expect(applyRectTransform(g, degenerate, to)).toBe(g);
+    const out = applyRectTransform(g, degenerate, to);
+    expect(out).not.toBe(g);
+    expect(out.points).toEqual([{x: 27.5, y: 5}, {x: 27.5, y: 50}]);
+  });
+
+  it('translates purely when both source axes are degenerate', () => {
+    const g: Geometry = {
+      type: 'GEO_ellipse',
+      penColor: 0, penType: 10, penWidth: 400,
+      ellipseCenterPoint: {x: 3, y: 4},
+      ellipseMajorAxisRadius: 7,
+      ellipseMinorAxisRadius: 2,
+      ellipseAngle: 45,
+    };
+    const point: Rect = {left: 3, top: 4, right: 3, bottom: 4};
+    const to: Rect = {left: 100, top: 200, right: 100, bottom: 200};
+    const out = applyRectTransform(g, point, to);
+    expect(out.ellipseCenterPoint).toEqual({x: 100, y: 200});
+    expect(out.ellipseMajorAxisRadius).toBe(7);
+    expect(out.ellipseMinorAxisRadius).toBe(2);
+    expect(out.ellipseAngle).toBe(45);
   });
 });
 

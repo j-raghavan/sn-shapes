@@ -24,9 +24,14 @@
  *   1. Tapping a shape cell selects it (no insert yet).
  *   2. Tapping a picker option mutates a local pendingStyle — the
  *      relevant picker cell highlights and the preview updates.
- *   3. Tapping OUTSIDE the panel (the overlay) commits: builds the
- *      Geometry with the chosen style and inserts via
- *      PluginCommAPI.insertGeometry. On success the popup closes; on
+ *   3. Pen down OUTSIDE the panel (the overlay) commits: builds the
+ *      Geometry with the chosen style, places it under the pen and
+ *      inserts via PluginCommAPI.insertGeometry. A tap inserts the
+ *      default-size shape centred on the pen tip; a drag fits the shape
+ *      into the swept box (a dashed rubber band shows the box while
+ *      dragging) so no post-insert lasso resize — and therefore no
+ *      firmware stroke-width scaling — is needed (issue #15, see
+ *      docs/adr/ADR-PEN-PLACEMENT.md). On success the popup closes; on
  *      failure an error banner appears and the popup stays open so the
  *      user can retry or edit their choices. The ✕ button in the header
  *      remains the explicit "cancel without inserting" affordance.
@@ -65,6 +70,7 @@ import {
   StyleSheet,
   ImageSourcePropType,
   ScrollView,
+  PixelRatio,
 } from 'react-native';
 import {
   PluginCommAPI,
@@ -91,6 +97,8 @@ import {
   isAcceptablePenWidth,
 } from './shapes';
 import StrokePreview from './StrokePreview';
+import PlacementOverlay, {OVERLAY_TEST_IDS} from './PlacementOverlay';
+import {PageSize, PlacementTarget, placeGeometry} from './placement';
 import {
   FavoritesStorage,
   getDefaultFavoritesStorage,
@@ -114,7 +122,10 @@ export const DEFAULT_PAGE_WIDTH = 1404;
 export const DEFAULT_PAGE_HEIGHT = 1872;
 
 export const TEST_IDS = {
-  overlay: 'shapes-overlay',
+  overlay: OVERLAY_TEST_IDS.overlay,
+  // The panel itself — tests use it to prove touches inside never reach
+  // the overlay.
+  panel: 'shapes-panel',
   cell: (id: ShapeId) => `shape-cell-${id}`,
   widthButton: (w: number) => `shapes-width-${w}`,
   colorButton: (c: number) => `shapes-color-${c}`,
@@ -123,6 +134,7 @@ export const TEST_IDS = {
   // overlay tap commits; the ✕ button cancels. Distinct testID so tests
   // can exercise the cancel path without heuristically walking the tree.
   closeButton: 'shapes-close-button',
+  rubberBand: OVERLAY_TEST_IDS.rubberBand,
   // Row 1 columns — tests use these to verify the grid + preview layout.
   shapesColumn: 'shapes-shapes-column',
   previewColumn: 'shapes-preview-column',
@@ -297,6 +309,12 @@ const GRID_HEIGHT_PX =
 // about the `{success, result}` envelope the firmware actually returns.
 type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | null | undefined;
 
+// dp → page px. `sn-plugin-lib` documents geometry points as Android
+// screen px and RN reports touches in dp (px / density), so one multiply
+// recovers the firmware coordinate space. Constant per device, hence
+// module-level (ADR-PEN-PLACEMENT D2). DEVICE-UNVERIFIED on Manta.
+const TOUCH_SCALE = PixelRatio.get();
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -331,8 +349,8 @@ async function resolvePageSize(): Promise<{width: number; height: number}> {
 }
 
 /**
- * Insert a shape at the page center with the user's chosen style baked
- * in. Every shape in SHAPES builds exactly one Geometry (v1.0.4), so
+ * Insert a shape at the pen's placement target with the user's chosen
+ * style baked in. Every shape in SHAPES builds exactly one Geometry (v1.0.4), so
  * the insert is always a single `PluginCommAPI.insertGeometry` call —
  * the inserted element respects the user's PenStyle (colour + width +
  * pen type), stays crisp at any zoom, and remains editable as a single
@@ -354,14 +372,16 @@ async function resolvePageSize(): Promise<{width: number; height: number}> {
 async function insertShape(
   shape: Shape,
   style: PenStyle,
-  pageWidth: number,
-  pageHeight: number,
+  target: PlacementTarget,
+  page: PageSize,
 ): Promise<void> {
-  const center = {x: pageWidth / 2, y: pageHeight / 2};
   const params = Object.fromEntries(
     shape.parameters.map(p => [p.id, p.defaultValue]),
   );
-  const geometry = shape.build(center, params, style);
+  // Build at the page centre with default params, then let placement
+  // translate (tap) or fit (drag) it — shapes stay ignorant of gestures.
+  const built = shape.build({x: page.width / 2, y: page.height / 2}, params, style);
+  const geometry = placeGeometry(built, target, page);
   // Auto-lasso the element so users can immediately drag it — the
   // element IS the shape.
   geometry.showLassoAfterInsert = true;
@@ -370,6 +390,9 @@ async function insertShape(
     console.error('insertGeometry failed:', JSON.stringify(res));
     throw new Error(res?.error?.message ?? 'insertGeometry failed');
   }
+  // Issue #15 reported a one-off vanishing shape we could not reproduce;
+  // keep the firmware's verdict in logcat so a future report has evidence.
+  console.log('[SHAPES] insertGeometry', target.kind, JSON.stringify(res));
 }
 
 const ERROR_DISPLAY_MS = 2000;
@@ -395,6 +418,10 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
 
   const [pageWidth, setPageWidth] = useState(DEFAULT_PAGE_WIDTH);
   const [pageHeight, setPageHeight] = useState(DEFAULT_PAGE_HEIGHT);
+  const page = useMemo<PageSize>(
+    () => ({width: pageWidth, height: pageHeight}),
+    [pageWidth, pageHeight],
+  );
 
   // Selection state. Default to rectangle — matches the native popup's
   // typical landing state and gives the preview something to show before
@@ -602,7 +629,7 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
    * affordance — it calls PluginManager.closePluginView directly without
    * going through insertShape.
    */
-  const handleOverlayPress = useCallback(async () => {
+  const commitAt = useCallback(async (target: PlacementTarget) => {
     if (insertingRef.current) {return;}
     insertingRef.current = true;
     setError(null);
@@ -611,7 +638,7 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
       errorTimerRef.current = null;
     }
     try {
-      await insertShape(selectedShape, style, pageWidth, pageHeight);
+      await insertShape(selectedShape, style, target, page);
       PluginManager.closePluginView();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Insert failed';
@@ -619,14 +646,12 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
     } finally {
       insertingRef.current = false;
     }
-  }, [selectedShape, style, pageWidth, pageHeight, showError]);
+  }, [selectedShape, style, page, showError]);
 
   return (
-    <Pressable
-      testID={TEST_IDS.overlay}
-      style={styles.container}
-      onPress={handleOverlayPress}>
+    <PlacementOverlay page={page} scale={TOUCH_SCALE} onCommit={commitAt}>
       <Pressable
+        testID={TEST_IDS.panel}
         style={[styles.panel, {width: PANEL_WIDTH}]}
         onPress={e => e.stopPropagation()}>
         <View style={styles.headerRow}>
@@ -807,14 +832,15 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
 
           <View style={styles.divider} />
 
-          {/* Centred tagline carried over from the contrib branch
-              (2026-04-20). Non-interactive — purely a community wink. */}
+          {/* Centred hint for the overlay gesture (issue #15). Replaces
+              the earlier community tagline so the one line of footer
+              text earns its place by teaching tap-vs-drag. */}
           <Text testID={TEST_IDS.footer} style={styles.footer}>
-            Made with ❤️ for those who write.
+            Tap the page to place, or drag to draw a box.
           </Text>
         </View>
       </Pressable>
-    </Pressable>
+    </PlacementOverlay>
   );
 }
 
@@ -875,19 +901,6 @@ function ShapeGrid({shapes, selectedId, onSelect}: ShapeGridProps) {
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    flexDirection: 'row',
-    // `alignItems` is the cross axis for a row flex container, so this
-    // vertically centers the panel inside the full-page overlay. Prior
-    // to 2026-04-20 the panel was pinned near the top (`top: '2%'`,
-    // `alignItems: 'flex-start'`) which looked correct on Nomad but
-    // stranded the panel well above the puzzle-piece plugin icon on
-    // Manta. Centering gets us close to the icon's Y on both form
-    // factors without the SDK needing to expose the button rect.
-    alignItems: 'center',
-    backgroundColor: 'transparent',
-  },
   panel: {
     // Horizontally anchored alongside the left toolbar so it reads as
     // "attached to" the Plugins icon rather than floating in space.
@@ -1135,9 +1148,9 @@ const styles = StyleSheet.create({
     color: '#000000',
     fontWeight: '600',
   },
-  // Centred tagline sitting below the pickers. Muted grey + small size so
+  // Centred hint sitting below the pickers. Muted grey + small size so
   // it doesn't compete with the interactive rows for attention — reads as
-  // a signature, not a button. Padding matches the panel's rhythm
+  // a caption, not a button. Padding matches the panel's rhythm
   // (PANEL_PADDING) so it aligns with the content columns above.
   footer: {
     textAlign: 'center',
