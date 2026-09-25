@@ -38,8 +38,18 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 2. Tap the **Plugins** icon in the left toolbar (the puzzle piece).
 3. Tap **Shapes** to open the popup.
 4. Tap a shape in the grid to select it, then tune **Stroke Width** (XS / S / M / L / XL) and **Stroke Color** using the pickers below. The live preview updates as you go.
-5. Put the pen down **anywhere outside the popup** to commit. A **tap** inserts the shape at its default size centred under the pen tip; a **drag** draws a box (an outline follows the pen) and the shape is fitted into it at the stroke width you picked (resizing later with the lasso handle scales the stroke, so draw the box at the size you want). Circles keep their proportions and use the shorter side of the box; a dragged Line runs from pen-down to pen-up. Either way the shape is auto-lassoed so you can still reposition it straight away.
+5. Put the pen down **anywhere outside the popup** to commit. A **tap** inserts the shape at its default size centred under the pen tip; a **drag** draws a box (an outline follows the pen) and the shape is fitted into it at the stroke width you picked. By default the shape stretches to fill the box; tick **Keep aspect ratio** to keep its proportions instead (it is scaled to fit inside the box and centred). Circles always keep their proportions and use the shorter side of the box; a dragged Line runs from pen-down to pen-up. Either way the shape is auto-lassoed so you can still reposition it straight away.
 6. To dismiss without inserting, tap the ✕ in the popup header.
+
+### Resizing a placed shape
+
+The Supernote's own lasso handle keeps a shape's proportions and scales its stroke width with it. To stretch a shape to any width and height at the stroke width you picked:
+
+1. Lasso the shape, then tap **Shapes** in the lasso toolbar (it may sit under the toolbar's overflow menu).
+2. Tap **Resize freely**. The shape's current size is outlined.
+3. Drag a new box with the pen. The shape is redrawn to fill it; a circle becomes an ellipse if the box isn't square. Tap ✕ to cancel.
+
+Resize freely works on one shape at a time; a selection with several shapes or with handwriting shows "Select a single shape to resize."
 
 ## Building
 
@@ -74,11 +84,12 @@ npm run lint
 src/
   shapes.ts          Shape definitions and geometry helpers
   ShapePalette.tsx   Unified Shapes popup (grid, preview, pickers)
+  ShapeOptionsPanel.tsx  Edit Shape panel (lasso toolbar: Resize freely)
   StrokePreview.tsx  Live preview panel
 assets/
   icon.png           Toolbar icon
   shapes/            Shape thumbnail images
-index.js             Plugin entry point (toolbar button registration)
+index.js             Plugin entry point (sidebar + lasso-toolbar button registration)
 App.tsx              React Native root component
 ```
 

@@ -49,11 +49,10 @@
  *     offered was already set at insert time. Per user direction
  *     2026-04-18, the id=200 button + ShapeOptionsPanel routing were
  *     removed; this popup is now the only entry point for shapes.
- *   - ShapeOptionsPanel.tsx is retained as dead product code: it
- *     implements the lasso-toolbar re-style panel that may be revived
- *     in a future release. The WIDTH_PRESETS / COLOR_PRESETS /
- *     PEN_TYPE_PRESETS constants it used to own have all been moved to
- *     shapes.ts. Nothing in ShapePalette imports from ShapeOptionsPanel.
+ *   - #17 brought id=200 back for the one thing this popup cannot do:
+ *     ShapeOptionsPanel.tsx is now the Edit Shape panel (Resize freely
+ *     on a lassoed shape). Styling still lives here only; nothing in
+ *     ShapePalette imports from ShapeOptionsPanel.
  *
  * Why deferred-apply (instead of tap-to-insert + style after):
  *   - Firmware bug: modifyLassoGeometry silently drops pen props in

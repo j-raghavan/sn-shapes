@@ -5,6 +5,7 @@
 - Deciders: SnShapes (owner: J-Raghavan)
 - Spec: `spec/SPEC-PEN-PLACEMENT.md` (F1–F3) (local, uncommitted per repo convention: spec/ is gitignored)
 - Issue: #15 (pierrewjohnson) — "Minor functional choices differences"
+- Amended by: ADR-FREE-RESIZE (2026-09-24) — D3 wording on the native lasso; optional keep-aspect fit
 
 ## Context and Problem Statement
 
@@ -47,8 +48,9 @@ confirms on hardware.
 
 **D3 — Sizing by reuse.** Drag sizing reuses `geometryNaturalBounds` + `applyRectTransform`
 from `src/lassoTransform.ts`: build the geometry at default params, then map its natural
-bounds onto the target rect. Polygons, ellipses and lines scale freely per axis (this is
-what the native lasso does, so it matches the user's mental model). `GEO_circle` scales
+bounds onto the target rect. Polygons, ellipses and lines scale freely per axis (the native
+lasso handle, by contrast, keeps the aspect ratio — see #17 / ADR-FREE-RESIZE, which also
+adds an optional keep-aspect fit). `GEO_circle` scales
 uniformly to the shorter side and is centred in the box so a circle stays a circle.
 `applyRectTransform` is extended (additively, default-compatible) so a degenerate source
 axis (the horizontal Line has zero height) is translated instead of leaving the geometry
