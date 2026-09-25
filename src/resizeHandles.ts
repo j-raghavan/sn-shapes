@@ -21,9 +21,12 @@
 import {
   applyRectTransform,
   boundsMatch,
+  clamp,
   defaultLassoTolerance,
+  EPSILON,
   geometryNaturalBounds,
   Geometry,
+  isFiniteRect,
   Point,
   Rect,
 } from './lassoTransform';
@@ -49,8 +52,6 @@ export type ResizeEdit =
  */
 export type ResizeFrame = {stored: Rect; start: ResizeEdit; pending: boolean};
 
-const EPSILON = 1e-6;
-
 const CORNERS: ReadonlyArray<{handle: BoxHandle; x: 'left' | 'right'; y: 'top' | 'bottom'}> = [
   {handle: 'nw', x: 'left', y: 'top'},
   {handle: 'ne', x: 'right', y: 'top'},
@@ -63,16 +64,8 @@ const RIGHT_SIDE: ReadonlySet<Handle> = new Set(['ne', 'e', 'se']);
 const TOP_SIDE: ReadonlySet<Handle> = new Set(['nw', 'n', 'ne']);
 const BOTTOM_SIDE: ReadonlySet<Handle> = new Set(['sw', 's', 'se']);
 
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), hi);
-}
-
 function chebyshev(a: Point, b: Point): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
-}
-
-function isFiniteRect(r: Rect): boolean {
-  return [r.left, r.top, r.right, r.bottom].every(Number.isFinite);
 }
 
 function isUsableRect(r: Rect | null): r is Rect {

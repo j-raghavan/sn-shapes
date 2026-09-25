@@ -15,6 +15,8 @@
  */
 import {
   applyRectTransform,
+  clamp,
+  EPSILON,
   geometryNaturalBounds,
   Geometry,
   Point,
@@ -44,8 +46,6 @@ export type PlaceOptions = {
   keepAspect?: boolean;
 };
 
-const EPSILON = 1e-6;
-
 /**
  * dp → page px. `sn-plugin-lib` documents geometry points as Android screen
  * coordinates, and RN's `pageX/pageY` are those px divided by density, so
@@ -65,10 +65,6 @@ export function pageToTouch(p: Point, scale: number): Point {
 
 function sanitiseScale(scale: number): number {
   return Number.isFinite(scale) && scale > 0 ? scale : 1;
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), hi);
 }
 
 function clampPoint(p: Point, page: PageSize): Point {

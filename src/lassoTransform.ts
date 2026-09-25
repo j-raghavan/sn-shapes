@@ -29,7 +29,17 @@ export type Geometry = {
 };
 
 const DEG = Math.PI / 180;
-const EPSILON = 1e-6;
+
+/** Below this a length is treated as zero (a degenerate axis). */
+export const EPSILON = 1e-6;
+
+export function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(v, lo), hi);
+}
+
+export function isFiniteRect(r: Rect): boolean {
+  return [r.left, r.top, r.right, r.bottom].every(Number.isFinite);
+}
 
 /**
  * Axis-aligned bounding box of a geometry's own stored coordinates.
