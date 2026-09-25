@@ -307,6 +307,35 @@ function keepApart(p: Point, fallback: Point, anchor: Point, minSide: number): P
   return {x: anchor.x + ux * minSide, y: anchor.y + uy * minSide};
 }
 
+/** Width and height, in whatever unit the caller works in. */
+export type Size = {width: number; height: number};
+
+/**
+ * Where the floating Cancel / Done toolbar goes for a shape whose drawn
+ * bounds are `bounds` (all in dp): centred under the shape, `gap` below it;
+ * above it with the same gap when there is no room below; inside the box
+ * at its top (still `gap` in, clear of the top handles) when neither side
+ * has room. Always clamped to stay fully on screen. `gap` should exceed the
+ * handles' hit distance so the toolbar never covers one.
+ */
+export function toolbarPlacement(
+  bounds: Rect,
+  size: Size,
+  screen: Size,
+  gap: number,
+): {left: number; top: number} {
+  const left = clamp(
+    (bounds.left + bounds.right) / 2 - size.width / 2,
+    0,
+    Math.max(0, screen.width - size.width),
+  );
+  const below = bounds.bottom + gap;
+  if (below + size.height <= screen.height) {return {left, top: below};}
+  const above = bounds.top - gap - size.height;
+  if (above >= 0) {return {left, top: above};}
+  return {left, top: clamp(bounds.top + gap, 0, Math.max(0, screen.height - size.height))};
+}
+
 /** Same kind and every coordinate within `eps` page px. */
 export function editsEqual(a: ResizeEdit, b: ResizeEdit, eps = 0.5): boolean {
   const near = (u: number, v: number) => Math.abs(u - v) <= eps;

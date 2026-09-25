@@ -11,6 +11,7 @@ import {
   HANDLE_HIT_PX,
   ResizeEdit,
   resizeFrame,
+  toolbarPlacement,
 } from '../src/resizeHandles';
 import {geometryNaturalBounds, Geometry, Rect} from '../src/lassoTransform';
 import {PageSize} from '../src/placement';
@@ -403,6 +404,44 @@ describe('boxHandles', () => {
     expect(boxHandles({kind: 'box', rect})).toEqual(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']);
     expect(boxHandles({kind: 'box', rect, resizes: 'x'})).toEqual(['e', 'w']);
     expect(boxHandles({kind: 'box', rect, resizes: 'y'})).toEqual(['n', 's']);
+  });
+});
+
+describe('toolbarPlacement', () => {
+  const size = {width: 160, height: 40};
+  const screen = {width: 702, height: 936};
+  const gap = 24;
+
+  it('sits below the shape, centred on it', () => {
+    expect(toolbarPlacement({left: 100, top: 200, right: 300, bottom: 400}, size, screen, gap))
+      .toEqual({left: 120, top: 424});
+  });
+
+  it('uses the last pixel of room below before flipping', () => {
+    expect(toolbarPlacement({left: 100, top: 200, right: 300, bottom: 872}, size, screen, gap).top).toBe(896);
+    expect(toolbarPlacement({left: 100, top: 200, right: 300, bottom: 873}, size, screen, gap).top).toBe(136);
+  });
+
+  it('flips above when there is no room below', () => {
+    expect(toolbarPlacement({left: 100, top: 750, right: 300, bottom: 900}, size, screen, gap))
+      .toEqual({left: 120, top: 686});
+  });
+
+  it('goes inside the box at its top when neither side has room', () => {
+    expect(toolbarPlacement({left: 100, top: 0, right: 300, bottom: 936}, size, screen, gap))
+      .toEqual({left: 120, top: 24});
+    expect(toolbarPlacement({left: 100, top: 63, right: 300, bottom: 900}, size, screen, gap).top).toBe(87);
+  });
+
+  it('clamps inside the screen as a last resort', () => {
+    // A screen too small for the toolbar pins it to the origin.
+    const tiny = {width: 100, height: 30};
+    expect(toolbarPlacement({left: 0, top: 0, right: 100, bottom: 30}, size, tiny, gap)).toEqual({left: 0, top: 0});
+  });
+
+  it('clamps horizontally at the screen edges', () => {
+    expect(toolbarPlacement({left: 0, top: 200, right: 50, bottom: 400}, size, screen, gap).left).toBe(0);
+    expect(toolbarPlacement({left: 675, top: 200, right: 702, bottom: 400}, size, screen, gap).left).toBe(542);
   });
 });
 

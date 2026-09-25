@@ -20,7 +20,7 @@
  *   3. Done with the box unchanged, or Cancel, closes without writing. A
  *      changed box is remapped from the stored geometry (`applyResize`) and
  *      written with `modifyLassoGeometry`, re-sending every pen prop.
- *   4. Success closes the plugin view. Failure shows in the handles bar,
+ *   4. Success closes the plugin view. Failure shows in the toolbar,
  *      keeps the handles where the user left them, and leaves the shape
  *      untouched, so Done can be retried.
  *

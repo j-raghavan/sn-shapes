@@ -2,17 +2,19 @@
  * Tests for src/ResizeHandlesOverlay — the handles UI behind Edit Shape's
  * free resize (#17). Rendering of the box / line and its handles, the
  * gesture → edit wiring (throttle, release, terminate, busy) and the
- * Cancel / Done bar. The handle rules themselves live in
+ * floating Cancel / Done toolbar. The handle rules and the toolbar
+ * placement rule themselves live in
  * resizeHandles.test.ts.
  */
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
 import {StyleSheet} from 'react-native';
 import ResizeHandlesOverlay, {
-  BAR_HEIGHT_DP,
   HANDLE_SIZE_DP,
-  RESIZE_HINT,
   RESIZE_TEST_IDS,
+  TOOLBAR_HEIGHT_DP,
+  TOOLBAR_MESSAGE_HEIGHT_DP,
+  TOOLBAR_WIDTH_DP,
 } from '../src/ResizeHandlesOverlay';
 import {RUBBER_BAND_THROTTLE_MS} from '../src/PlacementOverlay';
 import {ResizeEdit} from '../src/resizeHandles';
@@ -110,32 +112,51 @@ describe('ResizeHandlesOverlay — rendering', () => {
     expect(style(RESIZE_TEST_IDS.handle('to'))).toMatchObject({left: 193, top: 293});
   });
 
-  it('shows the hint, or the parent\'s message instead', () => {
-    const {byId, rerender} = mount();
-    expect(byId(RESIZE_TEST_IDS.hint).props.children).toBe(RESIZE_HINT);
+  it('shows the parent\'s message in the toolbar only while set', () => {
+    const {has, byId, style, rerender} = mount();
+    expect(has(RESIZE_TEST_IDS.hint)).toBe(false);
+    expect(style(RESIZE_TEST_IDS.bar).height).toBe(TOOLBAR_HEIGHT_DP);
     rerender({message: 'Resize failed'});
     expect(byId(RESIZE_TEST_IDS.hint).props.children).toBe('Resize failed');
+    expect(style(RESIZE_TEST_IDS.bar).height).toBe(TOOLBAR_HEIGHT_DP + TOOLBAR_MESSAGE_HEIGHT_DP);
   });
 
-  it('puts the bar on the side with more room between the screen edge and the handles', () => {
-    // Page 1872 px tall at scale 2 → 936 dp of screen.
-    const upper = mount();
-    expect(upper.style(RESIZE_TEST_IDS.bar)).toMatchObject({bottom: 0, height: BAR_HEIGHT_DP});
-    expect(upper.style(RESIZE_TEST_IDS.bar).top).toBeUndefined();
-    const lower = mount({start: {kind: 'box', rect: {left: 200, top: 1500, right: 600, bottom: 1800}}});
-    expect(lower.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0});
-    const lowLine = mount({start: {kind: 'line', from: {x: 200, y: 1800}, to: {x: 400, y: 1000}}});
-    expect(lowLine.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0});
-    const highLine = mount({start: {kind: 'line', from: {x: 200, y: 900}, to: {x: 400, y: 60}}});
-    expect(highLine.style(RESIZE_TEST_IDS.bar)).toMatchObject({bottom: 0});
-  });
-
-  it('a shape as tall as the page keeps the bar on top, clear of the bottom handles', () => {
-    const tall = mount({start: {kind: 'box', rect: {left: 200, top: 0, right: 600, bottom: 1872}}});
-    expect(tall.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0});
+  // Page 1404 × 1872 px at scale 2 → a 702 × 936 dp screen; gap =
+  // max(handle 14 dp, hit 40 px = 20 dp) + 4 = 24 dp.
+  it('floats the toolbar just below the shape, centred, clear of the handles and their hit area', () => {
+    const {style} = mount();
+    const bar = style(RESIZE_TEST_IDS.bar);
+    expect(bar).toMatchObject({left: 120, top: 424, width: TOOLBAR_WIDTH_DP});
+    // Bottom handles sit at y = 400 dp; their squares and 20 dp hit area end above the toolbar.
     for (const h of ['sw', 's', 'se'] as const) {
-      expect(tall.style(RESIZE_TEST_IDS.handle(h)).top).toBeGreaterThan(BAR_HEIGHT_DP);
+      const sq = style(RESIZE_TEST_IDS.handle(h));
+      expect(sq.top + HANDLE_SIZE_DP).toBeLessThan(bar.top);
+      expect(sq.top + HANDLE_SIZE_DP / 2 + 20).toBeLessThan(bar.top);
     }
+  });
+
+  it('flips above the shape near the bottom of the page', () => {
+    const lower = mount({start: {kind: 'box', rect: {left: 200, top: 1500, right: 600, bottom: 1800}}});
+    expect(lower.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 120, top: 686});
+  });
+
+  it('sits inside the box at its top when a shape fills the page height', () => {
+    const tall = mount({start: {kind: 'box', rect: {left: 200, top: 0, right: 600, bottom: 1872}}});
+    expect(tall.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 120, top: 24});
+  });
+
+  it('stays on screen at the left and right page edges', () => {
+    const atLeft = mount({start: {kind: 'box', rect: {left: 0, top: 400, right: 100, bottom: 800}}});
+    expect(atLeft.style(RESIZE_TEST_IDS.bar).left).toBe(0);
+    const atRight = mount({start: {kind: 'box', rect: {left: 1350, top: 400, right: 1404, bottom: 800}}});
+    expect(atRight.style(RESIZE_TEST_IDS.bar).left).toBe(702 - TOOLBAR_WIDTH_DP);
+  });
+
+  it('places a line\'s toolbar below its lower endpoint, or above near the page bottom', () => {
+    const line = mount({start: {kind: 'line', from: {x: 400, y: 600}, to: {x: 200, y: 400}}});
+    expect(line.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 70, top: 324});
+    const low = mount({start: {kind: 'line', from: {x: 200, y: 1800}, to: {x: 400, y: 1000}}});
+    expect(low.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 70, top: 436});
   });
 
   it('a flat box draws only the handles it offers', () => {
@@ -245,7 +266,40 @@ describe('ResizeHandlesOverlay — gestures', () => {
   });
 });
 
-describe('ResizeHandlesOverlay — bar', () => {
+describe('ResizeHandlesOverlay — toolbar', () => {
+  it('hides while a handle is held and reappears where the shape lands', () => {
+    const {overlay, has, style} = mount();
+    act(() => {
+      overlay().onResponderGrant(touch(300, 400));
+      overlay().onResponderMove(touch(300, 450));
+    });
+    expect(has(RESIZE_TEST_IDS.bar)).toBe(false);
+    act(() => {
+      overlay().onResponderRelease(touch(300, 450));
+    });
+    expect(style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 120, top: 474});
+  });
+
+  it('reappears after a terminated drag, at the original place', () => {
+    const {overlay, has, style} = mount();
+    act(() => {
+      overlay().onResponderGrant(touch(300, 400));
+    });
+    expect(has(RESIZE_TEST_IDS.bar)).toBe(false);
+    act(() => {
+      overlay().onResponderTerminate();
+    });
+    expect(style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 120, top: 424});
+  });
+
+  it('stays up when a pen-down misses every handle', () => {
+    const {overlay, has} = mount();
+    act(() => {
+      overlay().onResponderGrant(touch(10, 800));
+    });
+    expect(has(RESIZE_TEST_IDS.bar)).toBe(true);
+  });
+
   it('Done hands the current edit to the parent; Cancel calls onCancel', () => {
     const {overlay, byId, onDone, onCancel} = mount();
     act(() => {
@@ -268,7 +322,7 @@ describe('ResizeHandlesOverlay — bar', () => {
     expect(byId(RESIZE_TEST_IDS.cancel).props.disabled).toBe(true);
   });
 
-  it('the bar swallows its own presses', () => {
+  it('the toolbar swallows its own presses', () => {
     const {byId} = mount();
     const stopPropagation = jest.fn();
     byId(RESIZE_TEST_IDS.bar).props.onPress({stopPropagation});

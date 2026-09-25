@@ -3,10 +3,12 @@
  * free resize (#17, ADR-FREE-RESIZE).
  *
  * Draws the edited box with eight handles (or a line with its two
- * endpoints) over the note, and a Cancel / Done bar. One responder owns
- * every touch: the pure `hitTest` picks the handle under the pen and
- * `dragHandle` computes the edit from the pen-down snapshot, so the handle
- * views themselves never take touches (`pointerEvents="none"`).
+ * endpoints) over the note, and a small Cancel / Done toolbar floating
+ * next to the shape (`toolbarPlacement`), hidden while a handle is held.
+ * One responder owns every other touch: the pure `hitTest` picks the
+ * handle under the pen and `dragHandle` computes the edit from the pen-down
+ * snapshot, so the handle views themselves never take touches
+ * (`pointerEvents="none"`).
  *
  * Only the box moves while dragging; the shape itself is redrawn by the
  * firmware after Done. Moves re-render at most every
@@ -19,23 +21,36 @@ import {GestureResponderEvent, Pressable, StyleSheet, Text, View} from 'react-na
 import {Point, Rect} from './lassoTransform';
 import {PageSize, pageToTouch, touchToPage} from './placement';
 import {boxStyle, RUBBER_BAND_THROTTLE_MS, touchPoint} from './PlacementOverlay';
-import {BoxHandle, boxHandles, dragHandle, Handle, hitTest, ResizeEdit} from './resizeHandles';
+import {
+  BoxHandle,
+  boxHandles,
+  dragHandle,
+  Handle,
+  HANDLE_HIT_PX,
+  hitTest,
+  ResizeEdit,
+  toolbarPlacement,
+} from './resizeHandles';
 
 export const RESIZE_TEST_IDS = {
   overlay: 'resize-overlay',
   box: 'resize-box',
   segment: 'resize-segment',
   handle: (h: Handle) => `resize-handle-${h}`,
+  // The floating Cancel / Done toolbar (named for the bar it replaced).
   bar: 'resize-bar',
+  // The parent's message (errors), shown in the toolbar while set.
   hint: 'resize-hint',
   cancel: 'resize-cancel',
   done: 'resize-done',
 } as const;
 
-export const RESIZE_HINT = 'Drag a handle to resize';
 /** Filled black square centred on each handle point. */
 export const HANDLE_SIZE_DP = 14;
-export const BAR_HEIGHT_DP = 44;
+export const TOOLBAR_WIDTH_DP = 160;
+export const TOOLBAR_HEIGHT_DP = 40;
+/** Extra toolbar height while a message line shows. */
+export const TOOLBAR_MESSAGE_HEIGHT_DP = 20;
 
 export type ResizeHandlesOverlayProps = {
   /** The edit the handles open on, from `resizeFrame(...).start`. */
@@ -45,7 +60,7 @@ export type ResizeHandlesOverlayProps = {
   scale: number;
   /** A write is in flight: gestures are ignored and both buttons disabled. */
   busy: boolean;
-  /** Replaces the hint while set (errors); the parent owns its timer. */
+  /** Shown in the toolbar while set (errors); the parent owns its timer. */
   message?: string | null;
   onCancel: () => void;
   onDone: (edit: ResizeEdit) => void;
@@ -82,18 +97,15 @@ function handlePoints(edit: ResizeEdit, scale: number): Array<[Handle, Point]> {
   return pts.filter(([h]) => offered.includes(h)).map(([h, p]) => [h, pageToTouch(p, scale)]);
 }
 
-/**
- * True when the bar belongs at the bottom: the side with more clearance
- * between the screen edge and the drawn handles wins, top on a tie. A
- * shape as tall as the page leaves no clearance either way; the bar then
- * sits on top, so the bottom handles stay reachable.
- */
-function barBelongsAtBottom(points: Array<[Handle, Point]>, page: PageSize, scale: number): boolean {
-  const ys = points.map(([, p]) => p.y);
-  const half = HANDLE_SIZE_DP / 2;
-  const topClear = Math.min(...ys) - half;
-  const bottomClear = pageToTouch({x: 0, y: page.height}, scale).y - (Math.max(...ys) + half);
-  return bottomClear > topClear;
+/** The drawn bounds of an edit, in dp: the box, or a line's endpoints' box. */
+function boundsDp(edit: ResizeEdit, scale: number): Rect {
+  if (edit.kind === 'box') {return dpRect(edit.rect, scale);}
+  const a = pageToTouch(edit.from, scale);
+  const b = pageToTouch(edit.to, scale);
+  return {
+    left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+    right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y),
+  };
 }
 
 /** A 2 px segment from `a` to `b` (dp): a View rotated about its midpoint. */
@@ -122,6 +134,9 @@ export default function ResizeHandlesOverlay({
   onDone,
 }: ResizeHandlesOverlayProps) {
   const [edit, setEdit] = useState<ResizeEdit>(start);
+  // The toolbar hides while a handle is held: fewer e-ink redraws, and no
+  // toolbar under the pen mid-drag. It reappears where the shape lands.
+  const [dragging, setDragging] = useState(false);
   // The pen-down snapshot never needs a re-render; the edit does.
   const snapRef = useRef<Snapshot | null>(null);
   const lastMoveAtRef = useRef(0);
@@ -135,6 +150,7 @@ export default function ResizeHandlesOverlay({
       if (!handle) {return;}
       snapRef.current = {edit, down, handle};
       lastMoveAtRef.current = 0;
+      setDragging(true);
     },
     [busy, edit, scale],
   );
@@ -166,6 +182,7 @@ export default function ResizeHandlesOverlay({
       snapRef.current = null;
       // Unthrottled: the final pen position always lands.
       setEdit(editAt(snap, e));
+      setDragging(false);
     },
     [editAt],
   );
@@ -175,12 +192,20 @@ export default function ResizeHandlesOverlay({
     if (!snap) {return;}
     snapRef.current = null;
     setEdit(snap.edit);
+    setDragging(false);
   }, []);
 
   const points = handlePoints(edit, scale);
-  // Evaluated per render; the responder is already granted, so a flip
-  // mid-drag cannot steal the gesture.
-  const barAtBottom = barBelongsAtBottom(points, page, scale);
+  const toolbarSize = {
+    width: TOOLBAR_WIDTH_DP,
+    height: TOOLBAR_HEIGHT_DP + (message ? TOOLBAR_MESSAGE_HEIGHT_DP : 0),
+  };
+  const screen = pageToTouch({x: page.width, y: page.height}, scale);
+  // Clear of both the drawn handle squares and the pen's hit area.
+  const gap = Math.max(HANDLE_SIZE_DP, pageToTouch({x: HANDLE_HIT_PX, y: 0}, scale).x) + 4;
+  const toolbarAt = toolbarPlacement(
+    boundsDp(edit, scale), toolbarSize, {width: screen.x, height: screen.y}, gap,
+  );
 
   return (
     <View
@@ -214,28 +239,35 @@ export default function ResizeHandlesOverlay({
           style={[styles.handle, {left: p.x - HANDLE_SIZE_DP / 2, top: p.y - HANDLE_SIZE_DP / 2}]}
         />
       ))}
-      {/* A Pressable swallows its own touches, so tapping the bar never
-          starts a handle drag. */}
-      <Pressable
-        testID={RESIZE_TEST_IDS.bar}
-        style={[styles.bar, barAtBottom ? styles.barBottom : styles.barTop]}
-        onPress={ev => ev.stopPropagation()}>
+      {/* A Pressable swallows its own touches, so tapping the toolbar never
+          starts a handle drag; everywhere else the overlay hit-tests. */}
+      {!dragging && (
         <Pressable
-          testID={RESIZE_TEST_IDS.cancel}
-          onPress={onCancel}
-          disabled={busy}
-          style={buttonStyle}>
-          <Text style={styles.buttonText}>Cancel</Text>
+          testID={RESIZE_TEST_IDS.bar}
+          style={[styles.toolbar, {...toolbarAt, width: toolbarSize.width, height: toolbarSize.height}]}
+          onPress={ev => ev.stopPropagation()}>
+          {message ? (
+            <Text testID={RESIZE_TEST_IDS.hint} numberOfLines={1} style={styles.messageText}>{message}</Text>
+          ) : null}
+          <View style={styles.buttonRow}>
+            <Pressable
+              testID={RESIZE_TEST_IDS.cancel}
+              onPress={onCancel}
+              disabled={busy}
+              style={buttonStyle}>
+              <Text style={styles.buttonText}>Cancel</Text>
+            </Pressable>
+            <View style={styles.separator} />
+            <Pressable
+              testID={RESIZE_TEST_IDS.done}
+              onPress={() => onDone(edit)}
+              disabled={busy}
+              style={buttonStyle}>
+              <Text style={styles.buttonText}>Done</Text>
+            </Pressable>
+          </View>
         </Pressable>
-        <Text testID={RESIZE_TEST_IDS.hint} style={styles.hintText}>{message ?? RESIZE_HINT}</Text>
-        <Pressable
-          testID={RESIZE_TEST_IDS.done}
-          onPress={() => onDone(edit)}
-          disabled={busy}
-          style={buttonStyle}>
-          <Text style={styles.buttonText}>Done</Text>
-        </Pressable>
-      </Pressable>
+      )}
     </View>
   );
 }
@@ -263,38 +295,35 @@ const styles = StyleSheet.create({
     height: HANDLE_SIZE_DP,
     backgroundColor: '#000000',
   },
-  bar: {
+  // Floating toolbar attached to the shape, like the firmware lasso one.
+  toolbar: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    height: BAR_HEIGHT_DP,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 10,
-    backgroundColor: '#FFFFFF',
-  },
-  barTop: {
-    top: 0,
-    borderBottomWidth: 1,
-    borderBottomColor: '#000000',
-  },
-  barBottom: {
-    bottom: 0,
-    borderTopWidth: 1,
-    borderTopColor: '#000000',
-  },
-  hintText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-  },
-  button: {
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: 4,
     borderWidth: 1.5,
     borderColor: '#000000',
+    borderRadius: 6,
+    backgroundColor: '#FFFFFF',
+    overflow: 'hidden',
+  },
+  messageText: {
+    height: TOOLBAR_MESSAGE_HEIGHT_DP,
+    lineHeight: TOOLBAR_MESSAGE_HEIGHT_DP,
+    fontSize: 12,
+    textAlign: 'center',
+    color: '#FFFFFF',
+    backgroundColor: '#1A1A1A',
+  },
+  buttonRow: {
+    flex: 1,
+    flexDirection: 'row',
+  },
+  separator: {
+    width: 1.5,
+    backgroundColor: '#000000',
+  },
+  button: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   buttonPressed: {
     backgroundColor: '#F0F0F0',
