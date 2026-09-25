@@ -50,6 +50,7 @@ jest.mock('sn-plugin-lib', () => ({
     getLassoRect: jest.fn(),
     getLassoElementTypeCounts: jest.fn(),
     modifyLassoGeometry: jest.fn(),
+    setLassoBoxState: jest.fn(),
     getCurrentFilePath: jest.fn(),
     getCurrentPageNum: jest.fn(),
   },
@@ -63,9 +64,12 @@ jest.mock('sn-plugin-lib', () => ({
 
 import ShapeOptionsPanel, {
   TEST_IDS,
+  UNREADABLE_MESSAGE,
   UNRESIZABLE_MESSAGE,
   UNSUPPORTED_MESSAGE,
 } from '../src/ShapeOptionsPanel';
+import * as resizeHandles from '../src/resizeHandles';
+import * as pageSize from '../src/pageSize';
 import ResizeHandlesOverlay, {RESIZE_TEST_IDS} from '../src/ResizeHandlesOverlay';
 import {geometryNaturalBounds, Geometry} from '../src/lassoTransform';
 import {ResizeEdit} from '../src/resizeHandles';
@@ -146,6 +150,7 @@ beforeEach(() => {
   api.getLassoRect.mockResolvedValue({success: true, result: LASSO_RECT});
   api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {polygonNum: 1, geometryNum: 1}});
   api.modifyLassoGeometry.mockResolvedValue({success: true, result: true});
+  api.setLassoBoxState.mockResolvedValue({success: true, result: true});
   api.getCurrentFilePath.mockResolvedValue({success: true, result: '/note/a.note'});
   api.getCurrentPageNum.mockResolvedValue({success: true, result: 0});
   (PluginFileAPI.getPageSize as jest.Mock).mockResolvedValue({success: true, result: {width: 1404, height: 1872}});
@@ -221,18 +226,64 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       ['two geometries', () => api.getLassoGeometries.mockResolvedValue({success: true, result: [SQUARE, CIRCLE]})],
       ['a stroke in the selection', () =>
         api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {geometryNum: 1, trailNum: 2}})],
+      ['a stroke and no geometryNum', () =>
+        api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {trailNum: 4}})],
       ['no geometry', () => api.getLassoGeometries.mockResolvedValue({success: true, result: []})],
+    ])('%s → "Select a single shape to resize."', async (_label, arrange) => {
+      arrange();
+      const tree = await mount();
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(false);
+      expect(byId(tree, TEST_IDS.unsupported).findByType(Text).props.children).toBe(UNSUPPORTED_MESSAGE);
+      expect(api.setLassoBoxState).not.toHaveBeenCalled();
+    });
+
+    it.each([
       ['a failed geometry read', () => api.getLassoGeometries.mockResolvedValue({success: false})],
       ['a throwing geometry read', () => api.getLassoGeometries.mockRejectedValue(new Error('bridge'))],
       ['a non-array result', () => api.getLassoGeometries.mockResolvedValue({success: true, result: {}})],
       ['a malformed geometry', () =>
         api.getLassoGeometries.mockResolvedValue({success: true, result: [{type: 'GEO_polygon'}]})],
       ['a null geometry entry', () => api.getLassoGeometries.mockResolvedValue({success: true, result: [null]})],
-    ])('%s → "Select a single shape to resize."', async (_label, arrange) => {
+    ])('%s → "Couldn\'t read the lassoed shape."', async (_label, arrange) => {
       arrange();
       const tree = await mount();
       expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(false);
-      expect(byId(tree, TEST_IDS.unsupported).findByType(Text).props.children).toBe(UNSUPPORTED_MESSAGE);
+      expect(byId(tree, TEST_IDS.unreadable).findByType(Text).props.children).toBe(UNREADABLE_MESSAGE);
+    });
+
+    it('setup that throws shows "Can\'t resize this shape." and logs it', async () => {
+      const spy = jest.spyOn(resizeHandles, 'resizeFrame').mockImplementation(() => {
+        throw new Error('boom');
+      });
+      try {
+        const tree = await mount();
+        expect(byId(tree, TEST_IDS.unresizable).findByType(Text).props.children).toBe(UNRESIZABLE_MESSAGE);
+        expect(consoleErrorSpy).toHaveBeenCalledWith('[EDIT_SHAPE] setup failed:', expect.any(Error));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('setup that fails after unmount is logged but updates nothing', async () => {
+      let reject: (e: Error) => void = () => {};
+      const spy = jest.spyOn(pageSize, 'resolvePageSize').mockReturnValue(
+        new Promise((_, r) => { reject = r; }),
+      );
+      try {
+        let tree: ReactTestRenderer;
+        act(() => {
+          tree = create(<ShapeOptionsPanel scale={SCALE} />);
+        });
+        act(() => tree!.unmount());
+        await act(async () => {
+          reject(new Error('late'));
+          await flushPromises();
+        });
+        expect(consoleErrorSpy).toHaveBeenCalledWith('[EDIT_SHAPE] setup failed:', expect.any(Error));
+        expect(api.setLassoBoxState).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it.each([
@@ -246,7 +297,7 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
     });
 
     it('unusable counts fall back to the geometry list and warn', async () => {
-      api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {trailNum: 4}});
+      api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {polygonNum: 1}});
       const tree = await mount();
       expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(true);
       expect(consoleWarnSpy).toHaveBeenCalledWith('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
@@ -360,6 +411,8 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       expect(g).toMatchObject({type: 'GEO_polygon', penColor: 0x9d, penType: 10, penWidth: 500});
       expect(geometryNaturalBounds(g)).toEqual(WIDER_RECT);
       expect(closeView).toHaveBeenCalledTimes(1);
+      // Closing: stays busy so nothing else runs while the view goes away.
+      expect(handles(tree).busy).toBe(true);
       expect(consoleLogSpy).toHaveBeenCalledWith(
         '[EDIT_SHAPE] modifyLassoGeometry', JSON.stringify({success: true, result: true}),
       );
@@ -484,6 +537,79 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       const tree = await mount();
       await done(tree, WIDER);
       expect(handles(tree).busy).toBe(false);
+    });
+  });
+
+  describe('firmware lasso box', () => {
+    /** Every setLassoBoxState / closePluginView call, in order. */
+    function calls(): string[] {
+      const order: Array<[number, string]> = [
+        ...api.setLassoBoxState.mock.calls.map((c, i) =>
+          [api.setLassoBoxState.mock.invocationCallOrder[i], c[0] === 1 ? 'hide' : 'show'] as [number, string]),
+        ...closeView.mock.invocationCallOrder.map(n => [n, 'close'] as [number, string]),
+      ];
+      return order.sort((a, b) => a[0] - b[0]).map(([, name]) => name);
+    }
+
+    it('is hidden when the handles come up and logged', async () => {
+      await mount();
+      expect(calls()).toEqual(['hide']);
+      expect(consoleLogSpy).toHaveBeenCalledWith('[EDIT_SHAPE] lassoBox', 1, JSON.stringify({success: true, result: true}));
+    });
+
+    it('is shown again before Cancel closes the view', async () => {
+      const tree = await mount();
+      await press(tree, RESIZE_TEST_IDS.cancel);
+      expect(calls()).toEqual(['hide', 'show', 'close']);
+    });
+
+    it('is shown again before an unchanged Done closes the view', async () => {
+      const tree = await mount();
+      await press(tree, RESIZE_TEST_IDS.done);
+      expect(calls()).toEqual(['hide', 'show', 'close']);
+    });
+
+    it('is shown again before a successful write closes the view', async () => {
+      const tree = await mount();
+      await done(tree, WIDER);
+      expect(calls()).toEqual(['hide', 'show', 'close']);
+      expect(api.setLassoBoxState.mock.invocationCallOrder[1])
+        .toBeGreaterThan(api.modifyLassoGeometry.mock.invocationCallOrder[0]);
+    });
+
+    it('stays hidden after a failed write (the handles are still up)', async () => {
+      api.modifyLassoGeometry.mockResolvedValue({success: false});
+      const tree = await mount();
+      await done(tree, WIDER);
+      expect(calls()).toEqual(['hide']);
+    });
+
+    it('is shown again on unmount, once', async () => {
+      const tree = await mount();
+      await press(tree, RESIZE_TEST_IDS.cancel);
+      act(() => tree.unmount());
+      expect(calls()).toEqual(['hide', 'show', 'close']);
+      const other = await mount();
+      act(() => other.unmount());
+      expect(api.setLassoBoxState.mock.calls.map(c => c[0])).toEqual([1, 0, 1, 0]);
+    });
+
+    it('is never touched for a message card', async () => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: []});
+      const tree = await mount();
+      await press(tree, TEST_IDS.overlay);
+      expect(calls()).toEqual(['close']);
+    });
+
+    it('a rejected or throwing call is logged and never blocks', async () => {
+      api.setLassoBoxState.mockRejectedValueOnce(new Error('no box'));
+      const tree = await mount();
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(true);
+      expect(consoleErrorSpy).toHaveBeenCalledWith('[EDIT_SHAPE] setLassoBoxState failed:', expect.any(Error));
+      api.setLassoBoxState.mockImplementationOnce(() => { throw new Error('sync'); });
+      await press(tree, RESIZE_TEST_IDS.cancel);
+      expect(closeView).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith('[EDIT_SHAPE] setLassoBoxState failed:', expect.objectContaining({message: 'sync'}));
     });
   });
 

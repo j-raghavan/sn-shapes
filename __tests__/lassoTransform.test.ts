@@ -361,7 +361,9 @@ describe('isSingleGeometrySelection (#17, AC5.1)', () => {
 
   it.each([
     ['empty counts', {}],
-    ['a non-numeric geometryNum', {geometryNum: '1', trailNum: 3}],
+    ['a non-numeric geometryNum', {geometryNum: '1'}],
+    ['only geometry subtype counts', {polygonNum: 1}],
+    ['zero non-geometry counts', {trailNum: 0}],
   ])('degrades to the geometry list for %s', (_label, counts) => {
     expect(isSingleGeometrySelection(counts, 1)).toBe(true);
     expect(isSingleGeometrySelection(counts, 2)).toBe(false);
@@ -376,6 +378,11 @@ describe('isSingleGeometrySelection (#17, AC5.1)', () => {
     'digestTextBoxEditableNum', 'trailLinkNum', 'textLinkNum', 'todoLinkNum',
   ])('rejects a mixed selection with %s > 0', field => {
     expect(isSingleGeometrySelection({geometryNum: 1, [field]: 1}, 1)).toBe(false);
+  });
+
+  it('refuses a positive non-geometry count even when geometryNum is missing', () => {
+    expect(isSingleGeometrySelection({trailNum: 4}, 1)).toBe(false);
+    expect(isSingleGeometrySelection({geometryNum: '1', titleNum: 1}, 1)).toBe(false);
   });
 
   it('ignores geometry subtype counts', () => {

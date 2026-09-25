@@ -30,6 +30,7 @@ jest.mock('sn-plugin-lib', () => ({
     getLassoGeometries: jest.fn().mockResolvedValue({success: true, result: []}),
     getLassoRect: jest.fn().mockResolvedValue({success: false}),
     getLassoElementTypeCounts: jest.fn().mockResolvedValue({success: false}),
+    setLassoBoxState: jest.fn().mockResolvedValue({success: true}),
     getCurrentFilePath: jest.fn().mockResolvedValue({success: false}),
     getCurrentPageNum: jest.fn().mockResolvedValue({success: false}),
   },
@@ -72,15 +73,20 @@ async function press(id: number) {
 }
 
 let logSpy: jest.SpyInstance;
+let warnSpy: jest.SpyInstance;
 beforeEach(() => {
   mockLastEvent = null;
   mockListener = null;
   mockOnSubscribe = null;
   (PluginCommAPI.getLassoGeometries as jest.Mock).mockClear();
   logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  // The lasso view mounts with failed counts reads, so it warns that it is
+  // falling back to the geometry list.
+  warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => {
   logSpy.mockRestore();
+  warnSpy.mockRestore();
 });
 
 describe('App routing (AC8.2)', () => {
@@ -95,6 +101,7 @@ describe('App routing (AC8.2)', () => {
     const tree = await mount();
     expect(has(tree, EDIT_IDS.card)).toBe(true);
     expect(has(tree, PALETTE_IDS.panel)).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
   });
 
   it('follows later button events in both directions', async () => {

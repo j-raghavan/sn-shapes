@@ -13,9 +13,10 @@
  *      in parallel. Until they resolve a Loading… card shows and no handle
  *      exists, so nothing can act on a half-read selection.
  *   2. Exactly one geometry and nothing else, with a resizable frame
- *      (`resizeFrame`) → the handles (`ResizeHandlesOverlay`). Otherwise a
- *      card says why. A failed counts read degrades to the geometry list;
- *      a failed rect read to the stored bounds.
+ *      (`resizeFrame`) → the handles (`ResizeHandlesOverlay`), with the
+ *      firmware lasso box hidden until any way out. Otherwise a card says
+ *      why. A failed counts read degrades to the geometry list; a failed
+ *      rect read to the stored bounds.
  *   3. Done with the box unchanged, or Cancel, closes without writing. A
  *      changed box is remapped from the stored geometry (`applyResize`) and
  *      written with `modifyLassoGeometry`, re-sending every pen prop.
@@ -24,7 +25,8 @@
  *      untouched, so Done can be retried.
  *
  * DEVICE-UNVERIFIED (ADR-FREE-RESIZE): where the handles open after a
- * native lasso resize (see the `[EDIT_SHAPE] frame` log); circle → ellipse.
+ * native lasso resize (see the `[EDIT_SHAPE] frame` log); circle → ellipse;
+ * hiding and restoring the lasso box (`[EDIT_SHAPE] lassoBox` log).
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {View, Text, Pressable, StyleSheet} from 'react-native';
@@ -42,23 +44,46 @@ import ResizeHandlesOverlay from './ResizeHandlesOverlay';
 import {applyResize, editsEqual, ResizeEdit, ResizeFrame, resizeFrame} from './resizeHandles';
 
 export const TEST_IDS = {
-  // Outer full-screen Pressable behind a card (tap outside = close).
+  // Outer full-screen Pressable behind a message card (tap outside the
+  // card = close). The handles screen has its own Cancel instead.
   overlay: 'edit-shape-overlay',
   card: 'edit-shape-card',
   close: 'edit-shape-close',
   loading: 'edit-shape-loading',
+  unreadable: 'edit-shape-unreadable',
   unsupported: 'edit-shape-unsupported',
   unresizable: 'edit-shape-unresizable',
 } as const;
 
+export const UNREADABLE_MESSAGE = "Couldn't read the lassoed shape.";
 export const UNSUPPORTED_MESSAGE = 'Select a single shape to resize.';
 export const UNRESIZABLE_MESSAGE = "Can't resize this shape.";
 
 const ERROR_DISPLAY_MS = 2000;
 
+// setLassoBoxState values (PluginCommAPI): 0 = show, 1 = hide.
+const LASSO_BOX_SHOW = 0;
+const LASSO_BOX_HIDE = 1;
+
 type State =
-  | {mode: 'loading' | 'unsupported' | 'unresizable'}
+  | {mode: 'loading' | 'unreadable' | 'unsupported' | 'unresizable'}
   | {mode: 'resizing'; geometry: Geometry; frame: ResizeFrame; page: PageSize};
+
+/**
+ * Show or hide the firmware lasso box. Issued synchronously (so a show
+ * reaches the host before a following closePluginView) but never awaited
+ * and never throws: a failure only leaves the box as it was.
+ * DEVICE-UNVERIFIED: that hiding and restoring behave as documented.
+ */
+function setLassoBox(state: number): void {
+  try {
+    Promise.resolve(PluginCommAPI.setLassoBoxState(state))
+      .then(res => console.log('[EDIT_SHAPE] lassoBox', state, JSON.stringify(res)))
+      .catch(e => console.error('[EDIT_SHAPE] setLassoBoxState failed:', e));
+  } catch (e) {
+    console.error('[EDIT_SHAPE] setLassoBoxState failed:', e);
+  }
+}
 
 function isGeometry(x: unknown): x is Geometry {
   if (!x || typeof x !== 'object') {return false;}
@@ -129,16 +154,29 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
   const busyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Our handles replace the firmware lasso box while they are up; this
+  // records that it is hidden so every way out restores it exactly once.
+  const lassoHiddenRef = useRef(false);
+
+  const restoreLassoBox = useCallback(() => {
+    if (!lassoHiddenRef.current) {return;}
+    lassoHiddenRef.current = false;
+    setLassoBox(LASSO_BOX_SHOW);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([readLassoCounts(), readLassoGeometries(), readLassoRect(), resolvePageSize()])
       .then(([counts, geometries, rect, page]) => {
         if (cancelled) {return;}
+        if (!geometries) {
+          setState({mode: 'unreadable'});
+          return;
+        }
         if (!countsAreUsable(counts)) {
           console.warn('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
         }
-        if (!geometries || !isSingleGeometrySelection(counts, geometries.length)) {
+        if (!isSingleGeometrySelection(counts, geometries.length)) {
           setState({mode: 'unsupported'});
           return;
         }
@@ -152,13 +190,20 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
         console.log('[EDIT_SHAPE] frame', JSON.stringify({
           natural: frame.stored, lassoRect: rect, pending: frame.pending, start: frame.start,
         }));
+        lassoHiddenRef.current = true;
+        setLassoBox(LASSO_BOX_HIDE);
         setState({mode: 'resizing', geometry, frame, page});
+      })
+      .catch(e => {
+        console.error('[EDIT_SHAPE] setup failed:', e);
+        if (!cancelled) {setState({mode: 'unresizable'});}
       });
     return () => {
       cancelled = true;
       if (errorTimerRef.current) {clearTimeout(errorTimerRef.current);}
+      restoreLassoBox();
     };
-  }, []);
+  }, [restoreLassoBox]);
 
   const showError = useCallback((msg: string) => {
     setError(msg);
@@ -170,13 +215,15 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
   // it fails), so every close path is ignored while one is in flight.
   const close = useCallback(() => {
     if (busyRef.current) {return;}
+    restoreLassoBox();
     PluginManager.closePluginView();
-  }, []);
+  }, [restoreLassoBox]);
 
   const handleDone = useCallback(async (geometry: Geometry, frame: ResizeFrame, edit: ResizeEdit) => {
     if (busyRef.current) {return;}
     // Unchanged: nothing to write, whatever the start-box estimate was.
     if (editsEqual(edit, frame.start)) {
+      restoreLassoBox();
       PluginManager.closePluginView();
       return;
     }
@@ -187,6 +234,7 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
     }
     busyRef.current = true;
     setBusy(true);
+    let closing = false;
     try {
       // The full geometry goes back, so pen props are re-sent with the
       // new coordinates rather than left to the firmware to carry over.
@@ -198,14 +246,20 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
         return;
       }
       console.log('[EDIT_SHAPE] modifyLassoGeometry', JSON.stringify(res));
+      closing = true;
+      restoreLassoBox();
       PluginManager.closePluginView();
     } catch (e) {
       showError(e instanceof Error ? e.message : 'Resize failed');
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      // The view is going away on success; stay busy so nothing else runs.
+      // On failure the handles stay up (lasso box still hidden) for a retry.
+      if (!closing) {
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
-  }, [showError]);
+  }, [restoreLassoBox, showError]);
 
   if (state.mode === 'resizing') {
     const {geometry, frame} = state;
@@ -224,6 +278,7 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
 
   const cards = {
     loading: {testID: TEST_IDS.loading, text: 'Loading…'},
+    unreadable: {testID: TEST_IDS.unreadable, text: UNREADABLE_MESSAGE},
     unsupported: {testID: TEST_IDS.unsupported, text: UNSUPPORTED_MESSAGE},
     unresizable: {testID: TEST_IDS.unresizable, text: UNRESIZABLE_MESSAGE},
   };

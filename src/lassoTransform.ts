@@ -222,24 +222,24 @@ export function countsAreUsable(counts: LassoCounts | null): counts is LassoCoun
  * True when the lasso holds exactly one geometry and nothing else (#17).
  *
  * `geometryCount` is the length of `getLassoGeometries()`; `counts` is
- * `getLassoElementTypeCounts()`. With usable counts `geometryNum` must be
- * 1 and every numeric non-geometry kind 0 — a mixed selection is refused
- * rather than stretching only its geometry against a box the user drew
- * around several things. Geometry subtype counts (`straightLineNum`,
- * `circleNum`, `ellipseNum`) are ignored.
+ * `getLassoElementTypeCounts()`. Any positive non-geometry count (a stroke,
+ * a title, a text box...) refuses the selection, whether or not
+ * `geometryNum` is present: a mixed selection is never stretched through
+ * its one geometry. With usable counts `geometryNum` must also be 1.
+ * Geometry subtype counts (`polygonNum`, `circleNum`, ...) are ignored; the
+ * firmware omits zero counts entirely (confirmed on device).
  *
- * Unusable counts (see `countsAreUsable`) degrade to the geometry list
- * alone, deliberately, like every other failed read in the panel: only
- * the lassoed geometry is ever rewritten, never a stroke, so the worst a
- * missed mixed selection can do is stretch that one shape.
- * DEVICE-UNVERIFIED: what a lone shape reports for `trailNum` / `geometryNum`.
+ * Counts with no evidence of other elements and no numeric `geometryNum`
+ * (see `countsAreUsable`) degrade to the geometry list alone, deliberately,
+ * like every other failed read in the panel: only the lassoed geometry is
+ * ever rewritten, never a stroke.
  */
 export function isSingleGeometrySelection(counts: LassoCounts | null, geometryCount: number): boolean {
   if (geometryCount !== 1) {return false;}
-  if (!countsAreUsable(counts)) {return true;}
-  if (counts.geometryNum !== 1) {return false;}
-  return NON_GEOMETRY_COUNT_FIELDS.every(k => {
+  const others = counts !== null && NON_GEOMETRY_COUNT_FIELDS.some(k => {
     const v = counts[k];
-    return typeof v !== 'number' || v === 0;
+    return typeof v === 'number' && v > 0;
   });
+  if (others) {return false;}
+  return !countsAreUsable(counts) || counts.geometryNum === 1;
 }
