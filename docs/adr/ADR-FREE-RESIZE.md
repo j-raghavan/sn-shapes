@@ -1,9 +1,10 @@
-# ADR-FREE-RESIZE: Keep-aspect choice at insert, free resize from the lasso
+# ADR-FREE-RESIZE: Keep-aspect choice at insert, handle-based free resize from the lasso
 
-- Status: accepted (approved by owner 2026-09-24; implemented on `feat/issue-17-free-aspect-resize`)
+- Status: accepted (approved by owner 2026-09-24; revised the same day after on-device testing — D4/D5 superseded,
+  see "Revision history"; implemented on `feat/issue-17-free-aspect-resize`)
 - Date: 2026-09-24
 - Deciders: SnShapes (owner: J-Raghavan)
-- Spec: `spec/SPEC-FREE-RESIZE.md` (FR1–FR9) (local, uncommitted per repo convention: spec/ is gitignored)
+- Spec: `spec/SPEC-FREE-RESIZE.md` (local, uncommitted per repo convention: spec/ is gitignored)
 - Issue: #17 — "Feature request: resize a placed shape without keeping aspect ratio" (Reddit request)
 - Amends: ADR-PEN-PLACEMENT D3 (native-lasso wording)
 
@@ -28,19 +29,26 @@ ADR-PEN-PLACEMENT D3 claimed per-axis scaling "is what the native lasso does". T
 
 - Solve the request without depending on firmware behaviour we cannot change.
 - Stroke width must stay as picked (the #5 / #15 complaint).
-- Reuse `placement.ts`, `lassoTransform.ts`, `PlacementOverlay` and the retained `ShapeOptionsPanel`; no parallel
-  gesture or transform code.
+- "Free resize" must feel like resizing: grab the shape's box and pull, not draw a replacement (owner, on device).
+- Reuse `placement.ts`, `lassoTransform.ts`, the `PlacementOverlay` responder pattern and the retained
+  `ShapeOptionsPanel`; no parallel transform code.
 - Pure logic host-tested; firmware-dependent steps isolated and listed for on-device confirmation.
 - Phase 2 must be removable without touching Phase 1.
 
 ## Considered Options
 
 - **A. Popup checkbox only.** Small and fully host-testable, but a placed shape still cannot be reshaped.
-- **B. Lasso button only.** Reshapes placed shapes, but depends on several unverified firmware behaviours and leaves
-  the insert-time drag undiscoverable.
+- **B. Lasso button only.** Reshapes placed shapes, but leaves the insert-time drag undiscoverable.
 - **C. Both, in separable commits (chosen).**
 - **D. `resizeLassoRect` with a non-uniform rect.** Cheapest for Phase 2, but the firmware would scale the stroke and
   it is unknown whether it honours a non-uniform rect. Kept as an informational device spike only.
+
+For the Phase 2 gesture:
+
+- **G1. Draw a new box over an outline of the current one** (first implementation). Rejected on device: not
+  intuitive, and it needs an intermediate one-button panel.
+- **G2. Corner handles only.** Simpler targets, but no single-axis stretch.
+- **G3. Eight handles + move, Cancel/Done (chosen).**
 
 ## Decision
 
@@ -50,73 +58,108 @@ box and centred in it (`fitRectUniform`). Taps, Lines (pen-down → pen-up) and 
 unaffected. `placeGeometry` takes a defaulted options object `{keepAspect?}` so every existing caller is unchanged.
 
 **D2 — Preference persistence.** The checkbox value is stored under `@snshapes_preferences` in a versioned envelope by
-a new `preferencesStorage.ts`, reusing `favoritesStorage`'s AsyncStorage-or-memory backend resolution. AsyncStorage is
-not currently installed, so the value persists per JS-engine lifetime, exactly like favorites. A toggle made before
+`preferencesStorage.ts`, reusing `favoritesStorage`'s AsyncStorage-or-memory backend resolution. AsyncStorage is not
+currently installed, so the value persists per JS-engine lifetime, exactly like favorites. A toggle made before
 hydration completes wins over the loaded value.
 
 **D3 — Lasso button.** A type-2 lasso-toolbar button, id 200, named "Shapes", `editDataTypes: [5]` (5 = geometric
-shapes per `PluginEditButton`; the same registration, payload included, was verified on Chauvet 3.27.41 in April
-2026, so no `showType` is passed). It opens the "Edit Shape" panel (`ShapeOptionsPanel.tsx`, revived). `App.tsx`
-routes by button id via `viewForButtonId`. Only the Edit Shape panel is keyed on the button session, so each lasso
-press re-reads the selection while the palette keeps its state across sidebar presses. After subscribing, `App`
-re-reads the router's last event so one delivered between the first render and the subscription is not lost.
+shapes per `PluginEditButton`; no `showType` is passed — the host fills `showType=1`). Confirmed on device: it lists in
+the main lasso toolbar row (`menuLevel=1`) only for geometry selections. `App.tsx` routes by button id via
+`viewForButtonId`. Only the lasso view is keyed on the button session, so each lasso press re-reads the selection
+while the palette keeps its state. After subscribing, `App` re-reads the router's last event so one delivered between
+the first render and the subscription is not lost.
 
-**D4 — Edit Shape panel.** One action: **Resize freely**. The panel reads counts, geometries, lasso rect and page size
-in parallel. It is enabled only for exactly one geometry and nothing else (`isSingleGeometrySelection`); otherwise it
-shows "Select a single shape to resize." Counts without a numeric `geometryNum` (failed read or missing field) degrade,
-deliberately, to "the geometry list has one entry" with a `[EDIT_SHAPE] counts unavailable` warning: only the lassoed
-geometry is ever rewritten, never a stroke, so the worst a missed mixed selection can do is stretch that one shape. A
-rect read that fails or has any non-finite side degrades to the geometry's natural bounds. A geometry list with any malformed entry counts as unreadable, so
-it can never pass the single-shape check. The old re-style pickers, Delete and their helpers are removed: the popup
-sets style at insert and the firmware lasso already offers delete. With them go `bakeLassoResize`, `boundsMatch` and
-`defaultLassoTolerance` from `lassoTransform.ts`, whose only consumer they were (see D5).
+**D4 — Straight into resize (supersedes the one-button Edit Shape panel).** The lasso button opens the resize screen
+directly. `ShapeOptionsPanel` reads counts, geometries, lasso rect and page size in parallel; until they resolve it
+shows a small "Loading…" card (✕ closes; nothing has been written). Exactly one geometry and nothing else
+(`isSingleGeometrySelection`) opens the handles; anything else shows "Select a single shape to resize."; a single
+geometry whose bounds cannot be resolved or whose points all coincide shows "Can't resize this shape." Counts without a
+numeric `geometryNum` degrade, deliberately, to "the geometry list has one entry" with a warning: only the lassoed
+geometry is ever rewritten, never a stroke. A geometry list with any malformed entry counts as unreadable. The old
+re-style pickers and Delete remain removed (the popup sets style at insert; the firmware lasso deletes).
 
-**D5 — Resize gesture.** Resize freely switches the panel to a full-screen `PlacementOverlay` showing the current bounds
-as a static 1 px outline (`referenceRect`, distinct from the 2 px live rubber band) and a hint bar with ✕. The outline
-is the lasso rect, which includes stroke padding, so a box drawn over it yields a slightly larger shape by design. A
-drag defines the new box; a tap briefly changes the hint to "Drag to draw the new size". `resizeGeometryTo` (in
-`placement.ts`, beside `placeGeometry`) takes the drag target: a line follows the pen from pen-down to pen-up exactly
-as at insert (shared `followPen`); anything else has its stored natural bounds remapped absolutely onto the box
-(`applyRectTransform`), the same vertex-bounds convention as the insert-time drag. A geometry whose points all
-coincide cannot be stretched and reports "Can't resize this shape". The result is written with `modifyLassoGeometry`,
-re-sending the full geometry including pen props. The remap starts from the geometry's *stored* coordinates, so a
-pending native lasso resize (not reflected by `getLassoGeometries`) is replaced rather than baked in first. The stroke
-is rewritten at the shape's stored pen width (the width picked at insert): after a native handle resize the
-firmware-scaled stroke may snap back to that stored width. Success closes the plugin view. Failure — including
-`success: true` with `result: false`, which the SDK documents as "update failed" — returns to the panel with an
-error banner and leaves the shape untouched. Every close path is ignored while the modify is in flight.
+**D5 — Handle gesture (supersedes the draw-a-new-box gesture).** A full-screen responder (`ResizeHandlesOverlay`)
+shows the shape's box with eight 14 dp filled handles: corners stretch both axes freely, edges one axis, a drag inside
+the box moves it. A `straightLine` shows two endpoint handles joined by a segment; each endpoint drags freely. A bar
+with **Cancel**, a hint and **Done** is pinned to the top of the screen, or to the bottom when the box is under it.
+Hit-testing and drag math are pure (`resizeHandles.ts`): the pen grabs a handle within 40 page px (shrinking on small
+boxes; corners outrank edges outrank move); drags are computed absolutely from the pen-down snapshot, so the 40 ms
+render throttle cannot drift the result, and the release applies the exact final position. Sides stop the minimum
+side short of the opposite side (no flip); boxes and endpoints stay on the page without jumping when the start box is
+already slightly off-page. Nothing is written until Done. Cancel, or Done with an unchanged box (compared on the
+edit, before any geometry math), closes without calling `modifyLassoGeometry`.
 
-**D6 — Circles.** A circle stretched unevenly is written as `GEO_ellipse` (identical fields). A uniform stretch keeps
-`GEO_circle`. The comparison uses a relative epsilon. A rotated ellipse cannot represent a non-uniform scale exactly, so
-it is approximated (see `applyRectTransform`): the centre lands on the box centre and the type and angle are kept.
+**D6 — Starting box and write.** `N` is the geometry's stored vertex box (`geometryNaturalBounds`); `L` is the lasso
+rect (visual: stroke padding, plus any pending native-handle resize from the same lasso session, which
+`getLassoGeometries` does not reflect). If `L` matches `N` within `defaultLassoTolerance(penWidth)`
+(`boundsMatch`, restored from master), the handles open on `N`. Otherwise the shape was resized natively and the
+handles open on `L` inset by half that tolerance per side (capped at a quarter of each side), i.e. on the estimated
+visual vertex box. Either way the geometry written is `N` remapped straight onto the final box
+(`applyRectTransform(g, N, final)`): axis-aligned remaps compose, so a pending native resize is baked exactly and the
+padding estimate only positions the handles — it can never be written into the shape. A line writes its two endpoint
+handles as its points. The full geometry is re-sent, so pen props go back with the new coordinates; the stroke is
+rewritten at the stored pen width (a natively scaled stroke snaps back to it). Success closes the plugin view.
+Failure — including `success: true` with `result: false`, which the SDK documents as "update failed" — shows the
+error in the bar for 2 s and keeps the handles where the user left them, so Done can be retried. Cancel, Done and new
+gestures are ignored while the write is in flight. A `[EDIT_SHAPE] frame` log line records `N`, `L`, the pending flag
+and the start box.
 
-**D7 — Selection strictness.** With usable counts, `geometryNum` must be 1 and `trailNum` (and every other numeric
-non-geometry count) 0: a mixed selection would stretch only the geometry against a box drawn around several elements.
-The panel logs `[EDIT_SHAPE] counts` so the rule can be relaxed if the firmware turns out to count geometries in
-`trailNum`. Unusable counts fall back as described in D4.
+**D7 — Circles and ellipses.** A circle stretched unevenly is written as `GEO_ellipse` (identical fields); an even
+stretch keeps `GEO_circle` (relative epsilon). A rotated ellipse cannot represent a non-uniform scale exactly and is
+approximated by `applyRectTransform`: the centre lands on the box centre and type and angle are kept.
 
-**D8 — Shared page context.** `resolvePageSize`, the default page size and `TOUCH_SCALE` move from `ShapePalette.tsx` to
-`src/pageSize.ts` so the palette and the panel share one implementation. `ShapePalette` re-exports the defaults.
+**D8 — Selection strictness.** With usable counts, `geometryNum` must be 1 and every other numeric non-geometry count
+0. Confirmed on device: a lone shape reports `{"polygonNum":1,"geometryNum":1}` and the firmware omits zero counts
+(no `trailNum` key), so the strict path applies; two shapes report `geometryNum: 2` and are refused.
 
-**D9 — Docs.** ADR-PEN-PLACEMENT D3 and the README stop claiming the native lasso scales per axis, and describe the
-checkbox and Resize freely.
+**D9 — Shared page context.** `resolvePageSize`, the default page size and `TOUCH_SCALE` live in `src/pageSize.ts`,
+shared by the palette and the lasso view. `ShapePalette` re-exports the defaults.
+
+**D10 — Docs.** ADR-PEN-PLACEMENT D3 and the README stop claiming the native lasso scales per axis, and describe the
+checkbox and the handle resize.
 
 ## Consequences
 
 - The Reddit request is met at both points the plugin controls; the firmware handle is unchanged.
-- Resize freely rewrites the stroke at the stored pen width instead of letting the firmware scale it, which also
-  removes the #5 / #15 drift for that path.
-- New pure code (`fitRectUniform`, `pageToTouch`, `resizeGeometryTo`, `countsAreUsable`,
-  `isSingleGeometrySelection`) is host-tested in
-  isolation; `ShapeOptionsPanel` and `App` are covered by component tests. `index.js` stays an uncovered device shell.
-- Phase 2 (FR4–FR8) is a separate run of commits and can be reverted without touching Phase 1.
-- On-device confirmation required before merge:
-  - **(top priority)** what `trailNum` / `geometryNum` report for a lone lassoed shape (`[EDIT_SHAPE] counts`);
-  - which `penWidth` `getLassoGeometries` reports after a native handle resize;
-  - whether `modifyLassoGeometry` ever returns `success: true` with `result: false`;
-  - whether the 1 px outline and the 2 px rubber band are legible and distinct on e-ink;
-  - button visibility and placement; lasso staying active while the plugin is open; `modifyLassoGeometry` keeping
-    pen props and applying coordinates; circle → ellipse type change accepted; lasso box after close; outline
-    alignment; checkbox row layout.
-- Out of scope: changing the native handle; multi-shape resize; re-style/delete from the lasso panel;
+- Resizing from the lasso rewrites the stroke at the stored pen width instead of letting the firmware scale it,
+  which removes the #5 / #15 drift for that path.
+- Pure code (`fitRectUniform`, `pageToTouch`, `countsAreUsable`, `isSingleGeometrySelection`, `boundsMatch`,
+  `defaultLassoTolerance`, `resizeFrame`, `hitTest`, `dragHandle`, `editsEqual`, `applyResize`) is host-tested in
+  isolation; `ResizeHandlesOverlay`, `ShapeOptionsPanel` and `App` are covered by component tests. `index.js` stays an
+  uncovered device shell.
+- `resizeGeometryTo`, the `referenceRect` outline on `PlacementOverlay`, the tap hint and the one-button panel from the
+  first implementation are removed.
+- Phase 2 remains a separable run of commits; its docs must be trimmed by hand if it is reverted.
+- Confirmed on device (2026-09-24): counts shape for a lone shape and for two shapes; button listing and routing;
+  `modifyLassoGeometry` returning `{"success":true,"result":true}`; drag and tap insert.
+- Still to confirm on device:
+  - handles line up on a fresh lasso (`pending:false`), and on a natively resized shape (`pending:true`, inset
+    accuracy) — both visible in `[EDIT_SHAPE] frame`;
+  - that `getLassoGeometries` still returns pre-resize coordinates after a native resize on current firmware;
+  - handle size and hit area with the pen, legibility of the 40 ms box updates, bar flip near the top;
+  - Cancel and unchanged Done write nothing; circle → ellipse accepted; colour, width and pen type kept; lasso box
+    after close; shape + handwriting refused.
+- Out of scope: changing the native handle; multi-shape resize; rotating; moving a line as a whole;
   `resizeLassoRect`.
+
+## Implementation notes (handle rework)
+
+Small departures from the design sketch, each the minimal sound fix:
+
+- `applyResize(g, edit)` recomputes `N` from `g` instead of taking it as a parameter, so the write is stored → edited
+  by construction and a caller cannot pass a mismatched source box. `ResizeFrame` carries `pending` for the
+  `[EDIT_SHAPE] frame` probe.
+- A side's drag range always includes its start position: a box already narrower than the minimum side cannot shrink
+  further, but it never jumps outward when grabbed.
+- `resizeFrame` and `applyResize` also refuse a geometry with any non-finite point, which `geometryNaturalBounds` alone
+  can miss.
+- The unchanged-Done check and `applyResize` receive the geometry and frame from the render that drew the handles,
+  so there is no unreachable "not resizing" branch.
+
+## Revision history
+
+- 2026-09-24 (initial): Edit Shape panel with one action, **Resize freely**, which drew a replacement box over a 1 px
+  outline of the current bounds (`resizeGeometryTo`, `referenceRect`).
+- 2026-09-24 (revised after on-device testing): owner found drawing a replacement box unintuitive. D4/D5 replaced by
+  straight-into-resize with handles; D6 added (starting box and write); `boundsMatch` / `defaultLassoTolerance`
+  restored for start-box detection; device findings recorded in D3 and D8.

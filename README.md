@@ -45,13 +45,13 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 
 The Supernote's own lasso handle keeps a shape's proportions and scales its stroke width with it. To stretch a shape to any width and height without that:
 
-1. Lasso the shape, then tap **Shapes** in the lasso toolbar (it may sit under the toolbar's overflow menu).
-2. Tap **Resize freely**. The shape's current size is outlined.
-3. Drag a new box with the pen. The shape is redrawn to fill it; a circle becomes an ellipse if the box isn't square, and a line runs from where you pressed to where you lifted. A tap reminds you to drag. Tap ✕ to cancel.
+1. Lasso the shape, then tap **Shapes** in the lasso toolbar. The shape's box appears with eight handles and a **Cancel** / **Done** bar.
+2. Drag a handle. The **corners** stretch width and height freely; the **edges** stretch one direction only (left/right for width, top/bottom for height). Drag **inside the box** to move it. A **line** shows its two ends instead; drag either end anywhere.
+3. Adjust as often as you like; only the box moves while you drag. Tap **Done** to redraw the shape in the new box, or **Cancel** to leave it as it was. A circle becomes an ellipse if the box isn't square.
 
 The stroke is rewritten at the shape's stored pen width, which is the width you picked when inserting it. If you had already resized the shape with the lasso handle, the stroke the firmware scaled may snap back to that stored width.
 
-Resize freely works on one shape at a time; a selection with several shapes or with handwriting shows "Select a single shape to resize."
+This works on one shape at a time; a selection with several shapes or with handwriting shows "Select a single shape to resize."
 
 ## Building
 
@@ -86,7 +86,8 @@ npm run lint
 src/
   shapes.ts          Shape definitions and geometry helpers
   ShapePalette.tsx   Unified Shapes popup (grid, preview, pickers)
-  ShapeOptionsPanel.tsx  Edit Shape panel (lasso toolbar: Resize freely)
+  ShapeOptionsPanel.tsx  Edit Shape (lasso toolbar: resize handles)
+  ResizeHandlesOverlay.tsx  Resize handles UI (box, handles, Cancel / Done)
   StrokePreview.tsx  Live preview panel
 assets/
   icon.png           Toolbar icon
