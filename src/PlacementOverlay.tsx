@@ -9,16 +9,12 @@
  *
  * Coordinates are `nativeEvent.pageX/pageY` (root-view-relative dp).
  * `locationX/Y` would re-origin on whichever child the pen is over.
- *
- * The Edit Shape panel (#17) reuses the same gesture to draw a new box for
- * a lassoed shape, passing `referenceRect` to outline its current bounds.
  */
 import React, {useCallback, useRef, useState} from 'react';
 import {GestureResponderEvent, StyleSheet, View} from 'react-native';
 import {
   isDragGesture,
   PageSize,
-  pageToTouch,
   PlacementTarget,
   resolvePlacementTarget,
   touchToPage,
@@ -30,8 +26,6 @@ export const OVERLAY_TEST_IDS = {
   // Outline drawn while the user drags a box. Present only past the
   // drag threshold.
   rubberBand: 'shapes-rubber-band',
-  // Static outline of `referenceRect`, when one is given.
-  referenceRect: 'shapes-reference-rect',
 } as const;
 
 /**
@@ -47,8 +41,6 @@ export type PlacementOverlayProps = {
   scale: number;
   onCommit: (target: PlacementTarget) => void;
   children?: React.ReactNode;
-  /** Page-px rect drawn as a static outline, e.g. a lassoed shape's current bounds. */
-  referenceRect?: Rect | null;
 };
 
 // Hoisted so the responder prop is referentially stable across renders.
@@ -64,22 +56,11 @@ export function boxStyle(r: Rect) {
   return {left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top};
 }
 
-/** Page-px rect → dp rect, or null when any coordinate is non-finite. */
-function referenceBox(rect: Rect | null | undefined, scale: number): Rect | null {
-  if (!rect || ![rect.left, rect.top, rect.right, rect.bottom].every(Number.isFinite)) {
-    return null;
-  }
-  const a = pageToTouch({x: rect.left, y: rect.top}, scale);
-  const b = pageToTouch({x: rect.right, y: rect.bottom}, scale);
-  return {left: a.x, top: a.y, right: b.x, bottom: b.y};
-}
-
 export default function PlacementOverlay({
   page,
   scale,
   onCommit,
   children,
-  referenceRect,
 }: PlacementOverlayProps) {
   // The pen-down point never needs a re-render; the rubber band does.
   const penDownRef = useRef<Point | null>(null);
@@ -136,8 +117,6 @@ export default function PlacementOverlay({
     setRubberBand(null);
   }, []);
 
-  const reference = referenceBox(referenceRect, scale);
-
   return (
     <View
       testID={OVERLAY_TEST_IDS.overlay}
@@ -151,14 +130,6 @@ export default function PlacementOverlay({
       onResponderMove={handleMove}
       onResponderRelease={handleRelease}
       onResponderTerminate={handleTerminate}>
-      {/* Rendered before the rubber band so the band draws on top. */}
-      {reference && (
-        <View
-          testID={OVERLAY_TEST_IDS.referenceRect}
-          pointerEvents="none"
-          style={[styles.referenceRect, boxStyle(reference)]}
-        />
-      )}
       {rubberBand && (
         <View
           testID={OVERLAY_TEST_IDS.rubberBand}
@@ -191,16 +162,6 @@ const styles = StyleSheet.create({
   rubberBand: {
     position: 'absolute',
     borderWidth: 2,
-    borderStyle: 'solid',
-    borderColor: '#000000',
-  },
-  // Static outline of what is there now: 1 px so it reads as distinct
-  // from the 2 px live band (still solid — e-ink drops dash segments).
-  // Callers pass the lasso rect, which includes stroke padding, so a box
-  // drawn over the outline yields a slightly larger shape by design.
-  referenceRect: {
-    position: 'absolute',
-    borderWidth: 1,
     borderStyle: 'solid',
     borderColor: '#000000',
   },
