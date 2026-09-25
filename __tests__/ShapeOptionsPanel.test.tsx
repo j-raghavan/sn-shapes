@@ -50,7 +50,12 @@ jest.mock('sn-plugin-lib', () => ({
   },
 }));
 
-import ShapeOptionsPanel, {TEST_IDS, UNSUPPORTED_MESSAGE} from '../src/ShapeOptionsPanel';
+import ShapeOptionsPanel, {
+  RESIZE_HINT,
+  TAP_HINT,
+  TEST_IDS,
+  UNSUPPORTED_MESSAGE,
+} from '../src/ShapeOptionsPanel';
 import {OVERLAY_TEST_IDS} from '../src/PlacementOverlay';
 import {geometryNaturalBounds, Geometry} from '../src/lassoTransform';
 import {PluginCommAPI, PluginFileAPI, PluginManager} from 'sn-plugin-lib';
@@ -114,6 +119,10 @@ function lastModified(): Geometry {
 
 let consoleErrorSpy: jest.SpyInstance;
 let consoleLogSpy: jest.SpyInstance;
+let consoleWarnSpy: jest.SpyInstance;
+
+const hintText = (tree: ReactTestRenderer) =>
+  byId(tree, TEST_IDS.resizeHint).findAllByType(Text)[0].props.children;
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -129,12 +138,14 @@ beforeEach(() => {
   (PluginFileAPI.getPageSize as jest.Mock).mockResolvedValue({success: true, result: {width: 1404, height: 1872}});
   consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
 afterEach(() => {
   jest.useRealTimers();
   consoleErrorSpy.mockRestore();
   consoleLogSpy.mockRestore();
+  consoleWarnSpy.mockRestore();
 });
 
 describe('ShapeOptionsPanel (Edit Shape)', () => {
@@ -187,6 +198,26 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       expect(has(tree, TEST_IDS.resize)).toBe(false);
       const text = byId(tree, TEST_IDS.unsupported).findByType(Text);
       expect(text.props.children).toBe(UNSUPPORTED_MESSAGE);
+    });
+
+    it('B: unusable counts fall back to the geometry list and warn', async () => {
+      api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {trailNum: 4}});
+      const tree = await mount();
+      expect(has(tree, TEST_IDS.resize)).toBe(true);
+      expect(consoleWarnSpy).toHaveBeenCalledWith('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
+    });
+
+    it('B: usable counts do not warn', async () => {
+      await mount();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+
+    it('C: a lasso rect with a NaN side falls back to the natural bounds', async () => {
+      api.getLassoRect.mockResolvedValue({success: true, result: {left: 90, top: NaN, right: 310, bottom: 310}});
+      const tree = await mount();
+      await press(tree, TEST_IDS.resize);
+      const flat = Object.assign({}, ...[byId(tree, OVERLAY_TEST_IDS.referenceRect).props.style].flat());
+      expect(flat).toMatchObject({left: 50, top: 50, width: 100, height: 100});
     });
 
     it('AC7.3 minimal input: counts and rect reads failing still allow a resize from natural bounds', async () => {
@@ -307,13 +338,52 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       expect(out.ellipseMinorAxisRadius).toBeCloseTo(100, 6);
     });
 
-    it('AC7.4: a tap on the overlay does nothing and stays in resize mode', async () => {
+    it('AC7.4/L: a tap does not resize but briefly hints to drag, then the hint returns', async () => {
       const tree = await mount();
       await press(tree, TEST_IDS.resize);
+      expect(hintText(tree)).toBe(RESIZE_HINT);
       await gesture(tree, [100, 100], [100, 100]);
       expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
       expect(closeView).not.toHaveBeenCalled();
-      expect(has(tree, TEST_IDS.resizeHint)).toBe(true);
+      expect(hintText(tree)).toBe(TAP_HINT);
+      act(() => { jest.advanceTimersByTime(2000); });
+      expect(hintText(tree)).toBe(RESIZE_HINT);
+    });
+
+    it('E: success with result:false is a failure — banner, back to the panel, no close', async () => {
+      api.modifyLassoGeometry.mockResolvedValueOnce({success: true, result: false});
+      const tree = await mount();
+      await press(tree, TEST_IDS.resize);
+      await gesture(tree, [50, 50], [300, 100]);
+      expect(closeView).not.toHaveBeenCalled();
+      expect(has(tree, TEST_IDS.resize)).toBe(true);
+      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children).toBe('Resize failed');
+    });
+
+    it('D: ✕ is disabled and ignored while a modify is in flight', async () => {
+      let resolveModify: (v: unknown) => void = () => {};
+      api.modifyLassoGeometry.mockReturnValueOnce(new Promise(r => { resolveModify = r; }));
+      const tree = await mount();
+      await press(tree, TEST_IDS.resize);
+      const o = byId(tree, OVERLAY_TEST_IDS.overlay).props;
+      let pending: Promise<unknown> | undefined;
+      await act(async () => {
+        o.onResponderGrant(touch(50, 50));
+        pending = o.onResponderRelease(touch(300, 100));
+        await flushPromises();
+      });
+      expect(byId(tree, TEST_IDS.resizeCancel).props.disabled).toBe(true);
+      await press(tree, TEST_IDS.resizeCancel);
+      expect(closeView).not.toHaveBeenCalled();
+      await act(async () => {
+        resolveModify({success: false, error: {message: 'nope'}});
+        await pending;
+        await flushPromises();
+      });
+      // Back on the panel with the banner; closing works again.
+      expect(byId(tree, TEST_IDS.close).props.disabled).toBe(false);
+      await press(tree, TEST_IDS.close);
+      expect(closeView).toHaveBeenCalledTimes(1);
     });
 
     it('AC7.5: a failed modify shows the firmware message, returns to the panel and stays open', async () => {

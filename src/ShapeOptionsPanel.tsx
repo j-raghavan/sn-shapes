@@ -32,6 +32,7 @@ import {
   LassoCounts,
   Rect,
   geometryNaturalBounds,
+  countsAreUsable,
   isSingleGeometrySelection,
 } from './lassoTransform';
 import {
@@ -58,6 +59,8 @@ export const TEST_IDS = {
 } as const;
 
 export const UNSUPPORTED_MESSAGE = 'Select a single shape to resize.';
+export const RESIZE_HINT = 'Drag a new box. Tap ✕ to cancel.';
+export const TAP_HINT = 'Drag to draw the new size';
 
 const ERROR_DISPLAY_MS = 2000;
 
@@ -95,16 +98,13 @@ async function readLassoRect(): Promise<Rect | null> {
     const res = (await PluginCommAPI.getLassoRect()) as ApiRes<Partial<Rect>>;
     if (!res?.success) {return null;}
     const r = res.result;
-    if (
-      !r ||
-      typeof r.left !== 'number' ||
-      typeof r.right !== 'number' ||
-      typeof r.top !== 'number' ||
-      typeof r.bottom !== 'number'
-    ) {
+    // Any non-finite side (NaN included) → the caller falls back to the
+    // geometry's natural bounds.
+    if (!r || ![r.left, r.right, r.top, r.bottom].every(Number.isFinite)) {
       return null;
     }
-    return {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+    const {left, right, top, bottom} = r as Rect;
+    return {left, right, top, bottom};
   } catch (e) {
     console.error('[EDIT_SHAPE] getLassoRect failed:', e);
     return null;
@@ -133,7 +133,10 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
   const [lassoRect, setLassoRect] = useState<Rect | null>(null);
   const [page, setPage] = useState<PageSize>({width: DEFAULT_PAGE_WIDTH, height: DEFAULT_PAGE_HEIGHT});
   const [error, setError] = useState<string | null>(null);
+  // busyRef is the synchronous guard (a second release in the same tick);
+  // `busy` drives the UI so ✕ is disabled while a modify is in flight.
   const busyRef = useRef(false);
+  const [busy, setBusy] = useState(false);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -143,6 +146,9 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
         if (cancelled) {return;}
         setPage(size);
         setLassoRect(rect);
+        if (!countsAreUsable(counts)) {
+          console.warn('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
+        }
         if (geometries && isSingleGeometrySelection(counts, geometries.length)) {
           setGeometry(geometries[0]);
           setMode('ready');
@@ -162,7 +168,10 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
     errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
   }, []);
 
+  // Closing mid-modify would drop the result on the floor (no banner if
+  // it fails), so every close path is ignored while one is in flight.
   const close = useCallback(() => {
+    if (busyRef.current) {return;}
     PluginManager.closePluginView();
   }, []);
 
@@ -172,8 +181,13 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
   }, []);
 
   const handleResizeCommit = useCallback(async (target: PlacementTarget) => {
-    // A tap has no box to stretch into; keep waiting for a drag.
-    if (target.kind !== 'drag' || !geometry || busyRef.current) {return;}
+    if (!geometry || busyRef.current) {return;}
+    // A tap has no box to stretch into: say so in the hint bar and keep
+    // waiting for a drag.
+    if (target.kind !== 'drag') {
+      showError(TAP_HINT);
+      return;
+    }
     const next = resizeGeometryTo(geometry, target);
     if (!next) {
       showError("Can't resize this shape");
@@ -181,11 +195,14 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
       return;
     }
     busyRef.current = true;
+    setBusy(true);
     try {
       // The full geometry goes back, so pen props are re-sent with the
       // new coordinates rather than left to the firmware to carry over.
       const res = (await PluginCommAPI.modifyLassoGeometry(next)) as ApiRes<unknown>;
-      if (!res?.success) {
+      // The SDK documents `result: false` as "update failed", even with
+      // `success: true`.
+      if (!res?.success || res.result === false) {
         showError(res?.error?.message ?? 'Resize failed');
         setMode('ready');
         return;
@@ -197,6 +214,7 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
       setMode('ready');
     } finally {
       busyRef.current = false;
+      setBusy(false);
     }
   }, [geometry, showError]);
 
@@ -211,10 +229,12 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
           testID={TEST_IDS.resizeHint}
           style={styles.hintBar}
           onPress={e => e.stopPropagation()}>
-          <Text style={styles.hintText}>Drag a new box. Tap ✕ to cancel.</Text>
+          {/* The banner mechanism doubles as a transient hint here. */}
+          <Text style={styles.hintText}>{error ?? RESIZE_HINT}</Text>
           <Pressable
             testID={TEST_IDS.resizeCancel}
             onPress={close}
+            disabled={busy}
             style={({pressed}) => [styles.closeBtn, pressed && styles.closeBtnPressed]}>
             <Text style={styles.closeText}>✕</Text>
           </Pressable>
@@ -231,6 +251,7 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
           <Pressable
             testID={TEST_IDS.close}
             onPress={close}
+            disabled={busy}
             style={({pressed}) => [styles.closeBtn, styles.headerClose, pressed && styles.closeBtnPressed]}>
             <Text style={styles.closeText}>✕</Text>
           </Pressable>
