@@ -53,8 +53,18 @@ const EPSILON = 1e-6;
  * rather than producing NaN geometry.
  */
 export function touchToPage(p: Point, scale: number): Point {
-  const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const s = sanitiseScale(scale);
   return {x: p.x * s, y: p.y * s};
+}
+
+/** Page px → dp: the inverse of `touchToPage`, with the same scale guard. */
+export function pageToTouch(p: Point, scale: number): Point {
+  const s = sanitiseScale(scale);
+  return {x: p.x / s, y: p.y / s};
+}
+
+function sanitiseScale(scale: number): number {
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
 }
 
 function clamp(v: number, lo: number, hi: number): number {

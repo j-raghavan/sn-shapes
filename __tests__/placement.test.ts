@@ -9,6 +9,7 @@ import {
   isDragGesture,
   MIN_DRAG_SIDE_PX,
   PageSize,
+  pageToTouch,
   placeGeometry,
   resolvePlacementTarget,
   touchToPage,
@@ -49,6 +50,17 @@ describe('touchToPage (FR1.2)', () => {
 
   it.each([0, -1, NaN, Infinity])('falls back to scale 1 for %p', bad => {
     expect(touchToPage({x: 10, y: 20}, bad)).toEqual({x: 10, y: 20});
+  });
+});
+
+describe('pageToTouch (#17)', () => {
+  it('divides both coordinates by the scale (inverse of touchToPage)', () => {
+    expect(pageToTouch({x: 20, y: 40}, 2)).toEqual({x: 10, y: 20});
+    expect(pageToTouch(touchToPage({x: 7, y: 9}, 3), 3)).toEqual({x: 7, y: 9});
+  });
+
+  it.each([0, -1, NaN, Infinity])('falls back to scale 1 for %p', bad => {
+    expect(pageToTouch({x: 10, y: 20}, bad)).toEqual({x: 10, y: 20});
   });
 });
 

@@ -11,6 +11,7 @@ import PlacementOverlay, {
   RUBBER_BAND_THROTTLE_MS,
 } from '../src/PlacementOverlay';
 import {DRAG_THRESHOLD_PX, PlacementTarget} from '../src/placement';
+import {Rect} from '../src/lassoTransform';
 
 const PAGE = {width: 1404, height: 1872};
 const SCALE = 2;
@@ -19,11 +20,11 @@ function touchEvent(x: number, y: number) {
   return {nativeEvent: {pageX: x, pageY: y}};
 }
 
-function mount(onCommit: (t: PlacementTarget) => void = () => {}) {
+function mount(onCommit: (t: PlacementTarget) => void = () => {}, referenceRect?: Rect | null) {
   let tree: ReactTestRenderer;
   act(() => {
     tree = create(
-      <PlacementOverlay page={PAGE} scale={SCALE} onCommit={onCommit}>
+      <PlacementOverlay page={PAGE} scale={SCALE} onCommit={onCommit} referenceRect={referenceRect}>
         <Text testID="child">panel</Text>
       </PlacementOverlay>,
     );
@@ -156,5 +157,51 @@ describe('PlacementOverlay', () => {
     });
     const f = Object.assign({}, ...[band().props.style].flat());
     expect(f).toMatchObject({left: 10, top: 10, width: 50, height: 50});
+  });
+
+  describe('referenceRect (#17, FR6)', () => {
+    // findAllByProps matches both the composite View and its host node.
+    const reference = (tree: ReactTestRenderer) =>
+      tree.root.findAllByProps({testID: OVERLAY_TEST_IDS.referenceRect});
+
+    it('AC6.1: renders no outline without the prop', () => {
+      expect(reference(mount().tree)).toHaveLength(0);
+      expect(reference(mount(undefined, null).tree)).toHaveLength(0);
+    });
+
+    it('AC6.2: draws a static 2 px outline at the page rect converted to dp', () => {
+      const {tree} = mount(undefined, {left: 200, top: 400, right: 600, bottom: 500});
+      const [node] = reference(tree);
+      expect(node.props.pointerEvents).toBe('none');
+      const flat = Object.assign({}, ...[node.props.style].flat());
+      expect(flat).toMatchObject({
+        position: 'absolute', borderWidth: 2, borderStyle: 'solid',
+        left: 100, top: 200, width: 200, height: 50,
+      });
+    });
+
+    it('skips a non-finite rect', () => {
+      expect(reference(mount(undefined, {left: 0, top: 0, right: NaN, bottom: 10}).tree)).toHaveLength(0);
+    });
+
+    it('AC6.2: the rubber band draws on top, and a drag still commits', () => {
+      const onCommit = jest.fn();
+      const {tree, overlay} = mount(onCommit, {left: 0, top: 0, right: 100, bottom: 100});
+      act(() => {
+        overlay().onResponderGrant(touchEvent(100, 100));
+        overlay().onResponderMove(touchEvent(300, 300));
+      });
+      // Depth-first order == paint order among siblings.
+      const ids = tree.root
+        .findAll(n => [OVERLAY_TEST_IDS.referenceRect, OVERLAY_TEST_IDS.rubberBand]
+          .includes(n.props.testID))
+        .map(n => n.props.testID);
+      expect(ids.indexOf(OVERLAY_TEST_IDS.referenceRect)).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf(OVERLAY_TEST_IDS.referenceRect))
+        .toBeLessThan(ids.indexOf(OVERLAY_TEST_IDS.rubberBand));
+      act(() => { overlay().onResponderRelease(touchEvent(300, 300)); });
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({kind: 'drag'}));
+      expect(reference(tree).length).toBeGreaterThan(0);
+    });
   });
 });
