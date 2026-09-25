@@ -1,22 +1,16 @@
 /**
- * Lasso-transform utilities.
+ * Lasso-transform utilities: pure geometry bounds and rect remapping.
  *
- * Why this exists: when the user resizes a lassoed shape with the native
- * lasso handle, the firmware keeps the resize as a pending transform on the
- * *lasso selection*, not as a mutation of the geometry's own coordinates.
- * `PluginCommAPI.getLassoGeometries()` returns the geometry's *stored*
- * coordinates (pre-resize); `PluginCommAPI.getLassoRect()` returns the
- * current *visual* bounds (post-resize).
+ * Consumers:
+ *   - placement.ts fits a freshly built shape to a tap point or dragged
+ *     box at insert time (#15).
+ *   - the Edit Shape panel stretches a lassoed shape onto a new box and
+ *     writes it back with `modifyLassoGeometry` (#17). The remap is
+ *     absolute from the geometry's *stored* coordinates, so any pending
+ *     native lasso resize (which `getLassoGeometries()` does not reflect)
+ *     is simply replaced rather than baked in.
  *
- * If we call `modifyLassoGeometry(g)` with the stored (pre-resize) geometry
- * plus our pen-style patch, the firmware treats our `g` as the new truth
- * and discards the pending visual transform. Result: the shape snaps back
- * to its insert-time size every time the user tweaks width/color. That's
- * exactly the friction the Reddit reviewer flagged.
- *
- * The fix is to bake the lasso-rect delta into the geometry's own
- * coordinates *before* sending modify. This module is the pure-function
- * side of that: no RN / SDK imports, so it's trivially unit-testable.
+ * No RN / SDK imports, so everything here is host-testable.
  */
 
 export type Point = {x: number; y: number};
@@ -86,46 +80,6 @@ export function geometryNaturalBounds(g: Geometry): Rect | null {
     default:
       return null;
   }
-}
-
-/**
- * True when two rects match within the given tolerance (default 1px — e-ink
- * coordinates are integers). Used to skip baking when the user hasn't
- * actually resized the lasso.
- */
-export function boundsMatch(a: Rect, b: Rect, tol = 1): boolean {
-  return (
-    Math.abs(a.left - b.left) <= tol &&
-    Math.abs(a.right - b.right) <= tol &&
-    Math.abs(a.top - b.top) <= tol &&
-    Math.abs(a.bottom - b.bottom) <= tol
-  );
-}
-
-/**
- * Estimate how much larger than the vertex AABB the firmware's lasso rect
- * will be, purely due to stroke thickness + miter joins at polygon vertices.
- *
- * Why this exists: `geometryNaturalBounds` returns the *vertex* AABB, but
- * `PluginCommAPI.getLassoRect()` reports the *visual* bounds, which the
- * firmware inflates by roughly half the pen-stroke extent on each side, plus
- * miter safety at sharp angles. Empirically on Chauvet firmware 3.27.41
- * (Supernote Nomad) this was 6-17px for penWidth=900 on a parallelogram —
- * see logcat-phase1.txt.
- *
- * If we compare natural to lasso with a 1px tolerance, that built-in padding
- * looks exactly like a user resize and we mistakenly bake it into the stored
- * coordinates on every `modifyLassoGeometry` call. The shape then visibly
- * grows by ~10-20px every time the user tweaks a property — which is exactly
- * what the v1.0.1 Reddit reviewer flagged and what v1.0.2 alpha 1 still did.
- *
- * The coefficient here (penWidth / 40, floor 10) was fitted to the logcat
- * observations. It is deliberately generous so that ordinary user resizes
- * (typically 50%+ delta on at least one axis) still trigger baking.
- */
-export function defaultLassoTolerance(penWidth: number): number {
-  if (!Number.isFinite(penWidth) || penWidth <= 0) {return 10;}
-  return Math.max(10, Math.ceil(penWidth / 40));
 }
 
 function rectWidth(r: Rect): number {
@@ -207,32 +161,6 @@ export function applyRectTransform(g: Geometry, fromRect: Rect, toRect: Rect): G
     default:
       return g;
   }
-}
-
-/**
- * Convenience wrapper: if the lasso rect differs from the geometry's own
- * natural bounds by more than `tol`, bake the delta into the geometry.
- * Returns the (possibly unchanged) geometry.
- *
- * When `tol` is not provided it is auto-computed from `g.penWidth` via
- * `defaultLassoTolerance` to absorb the firmware's stroke-padding inflation
- * of the lasso rect. Pass an explicit `tol` (e.g. 1) to override — that's
- * useful in unit tests that want to verify transform behavior without the
- * padding heuristic.
- *
- * Returns the input unchanged when:
- *   - the lasso rect is null,
- *   - the geometry type is unknown,
- *   - the lasso rect matches the natural bounds within tolerance
- *     (no user resize detected).
- */
-export function bakeLassoResize(g: Geometry, lassoRect: Rect | null, tol?: number): Geometry {
-  if (!lassoRect) {return g;}
-  const natural = geometryNaturalBounds(g);
-  if (!natural) {return g;}
-  const effectiveTol = tol ?? defaultLassoTolerance(g.penWidth);
-  if (boundsMatch(natural, lassoRect, effectiveTol)) {return g;}
-  return applyRectTransform(g, natural, lassoRect);
 }
 
 /**
