@@ -87,9 +87,13 @@ never throw; each result is logged as `[EDIT_SHAPE] lassoBox`. DEVICE-UNVERIFIED
 shows the shape's box with eight 14 dp filled handles: corners stretch both axes freely, edges one axis, a drag inside
 the box moves it. A `straightLine` shows two endpoint handles joined by a segment; each endpoint drags freely. A
 compact **Cancel | Done** toolbar floats next to the shape, like the firmware lasso toolbar (`toolbarPlacement`, pure):
-centred just below the shape's drawn bounds (a line's endpoint box), with a gap wider than the handles' hit area so it
-never covers a handle; above the shape with the same gap when there is no room below; inside the box at its top when
-neither side has room (a shape as tall as the page); always clamped on screen. It hides while a handle is held (fewer
+centred just below the shape's drawn bounds (a line's endpoint box), with a gap wider than the handles' hit area, so
+placed below or above it never covers a handle; above the shape with the same gap when there is no room below; inside
+the box at its top when neither side has room (a shape as tall as the page), where it covers part of the move area and,
+on a narrow page-tall shape, may overlap the side edges' hit bands near the top; always clamped on screen. Placement
+always reserves room for the one-line error message, so an error appearing only grows the toolbar and never moves it.
+A failed write shows the short "Resize failed. Try again."; the firmware's own error is logged
+(`[EDIT_SHAPE] modifyLassoGeometry failed`). It hides while a handle is held (fewer
 e-ink redraws, nothing under the pen) and reappears where the shape lands. Its touches never start a handle drag;
 everywhere else the overlay hit-tests. Hit-testing and drag
 math are pure (`resizeHandles.ts`): the pen grabs a handle within 40 page px (shrinking on small boxes). Priority is
@@ -117,7 +121,7 @@ an estimate, so a Done that moves only some sides may shift the untouched ones b
 handles as its points. The full geometry is re-sent, so pen props go back with the new coordinates; the stroke is
 rewritten at the stored pen width (a natively scaled stroke snaps back to it). Success closes the plugin view.
 Failure — including `success: true` with `result: false`, which the SDK documents as "update failed" — shows the
-error as a line in the toolbar for 2 s and keeps the handles where the user left them, so Done can be retried. Cancel, Done and new
+short error line in the toolbar for 2 s and keeps the handles where the user left them, so Done can be retried. Cancel, Done and new
 gestures are ignored while the write is in flight. A `[EDIT_SHAPE] frame` log line records `N`, `L`, the pending flag
 and the start box.
 

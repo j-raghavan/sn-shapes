@@ -135,9 +135,22 @@ describe('ResizeHandlesOverlay — rendering', () => {
     }
   });
 
+  it('an error message grows the toolbar without moving it or changing its side', () => {
+    // Bottom at 856 dp: 856 + 24 + 40 = 920 fits the bare toolbar, but the
+    // reserved 60 dp would not, so it sits above from the start.
+    const near = mount({start: {kind: 'box', rect: {left: 200, top: 1400, right: 600, bottom: 1712}}});
+    const before = near.style(RESIZE_TEST_IDS.bar);
+    expect(before).toMatchObject({left: 120, top: 700 - 24 - 60});
+    near.rerender({message: 'Resize failed. Try again.'});
+    const after = near.style(RESIZE_TEST_IDS.bar);
+    expect(after).toMatchObject({left: before.left, top: before.top});
+    expect(after.height).toBe(before.height + 20);
+  });
+
   it('flips above the shape near the bottom of the page', () => {
     const lower = mount({start: {kind: 'box', rect: {left: 200, top: 1500, right: 600, bottom: 1800}}});
-    expect(lower.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 120, top: 686});
+    // Above by gap + the reserved 60 dp (toolbar plus message line).
+    expect(lower.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 120, top: 750 - 24 - 60});
   });
 
   it('sits inside the box at its top when a shape fills the page height', () => {
@@ -156,7 +169,7 @@ describe('ResizeHandlesOverlay — rendering', () => {
     const line = mount({start: {kind: 'line', from: {x: 400, y: 600}, to: {x: 200, y: 400}}});
     expect(line.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 70, top: 324});
     const low = mount({start: {kind: 'line', from: {x: 200, y: 1800}, to: {x: 400, y: 1000}}});
-    expect(low.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 70, top: 436});
+    expect(low.style(RESIZE_TEST_IDS.bar)).toMatchObject({left: 70, top: 500 - 24 - 60});
   });
 
   it('a flat box draws only the handles it offers', () => {

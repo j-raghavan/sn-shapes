@@ -200,11 +200,14 @@ export default function ResizeHandlesOverlay({
     width: TOOLBAR_WIDTH_DP,
     height: TOOLBAR_HEIGHT_DP + (message ? TOOLBAR_MESSAGE_HEIGHT_DP : 0),
   };
+  // Placed as if the message line were always there, so an error appearing
+  // (or clearing) only grows the drawn toolbar and never moves it.
+  const reserved = {width: TOOLBAR_WIDTH_DP, height: TOOLBAR_HEIGHT_DP + TOOLBAR_MESSAGE_HEIGHT_DP};
   const screen = pageToTouch({x: page.width, y: page.height}, scale);
   // Clear of both the drawn handle squares and the pen's hit area.
   const gap = Math.max(HANDLE_SIZE_DP, pageToTouch({x: HANDLE_HIT_PX, y: 0}, scale).x) + 4;
   const toolbarAt = toolbarPlacement(
-    boundsDp(edit, scale), toolbarSize, {width: screen.x, height: screen.y}, gap,
+    boundsDp(edit, scale), reserved, {width: screen.x, height: screen.y}, gap,
   );
 
   return (

@@ -58,6 +58,9 @@ export const TEST_IDS = {
 export const UNREADABLE_MESSAGE = "Couldn't read the lassoed shape.";
 export const UNSUPPORTED_MESSAGE = 'Select a single shape to resize.';
 export const UNRESIZABLE_MESSAGE = "Can't resize this shape.";
+/** Shown for any failed write; the firmware's own error is only logged (it
+ *  can be long, and the toolbar has one short line). */
+export const RESIZE_FAILED_MESSAGE = 'Resize failed. Try again.';
 
 const ERROR_DISPLAY_MS = 2000;
 
@@ -242,7 +245,8 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
       // The SDK documents `result: false` as "update failed", even with
       // `success: true`.
       if (!res?.success || res.result === false) {
-        showError(res?.error?.message ?? 'Resize failed');
+        console.error('[EDIT_SHAPE] modifyLassoGeometry failed:', JSON.stringify(res));
+        showError(RESIZE_FAILED_MESSAGE);
         return;
       }
       console.log('[EDIT_SHAPE] modifyLassoGeometry', JSON.stringify(res));
@@ -250,7 +254,8 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
       restoreLassoBox();
       PluginManager.closePluginView();
     } catch (e) {
-      showError(e instanceof Error ? e.message : 'Resize failed');
+      console.error('[EDIT_SHAPE] modifyLassoGeometry failed:', e);
+      showError(RESIZE_FAILED_MESSAGE);
     } finally {
       // The view is going away on success; stay busy so nothing else runs.
       // On failure the handles stay up (lasso box still hidden) for a retry.

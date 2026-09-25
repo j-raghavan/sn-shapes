@@ -63,6 +63,7 @@ jest.mock('sn-plugin-lib', () => ({
 }));
 
 import ShapeOptionsPanel, {
+  RESIZE_FAILED_MESSAGE,
   TEST_IDS,
   UNREADABLE_MESSAGE,
   UNRESIZABLE_MESSAGE,
@@ -465,45 +466,47 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
 
   describe('write failures', () => {
     it.each([
-      ['a firmware message', {success: false, error: {message: 'locked'}}, 'locked'],
-      ['no message', {success: false}, 'Resize failed'],
-      ['success with result:false', {success: true, result: false}, 'Resize failed'],
-    ])('an unsuccessful modify with %s shows it, keeps the handles and stays open', async (_l, res, msg) => {
+      ['a long firmware message', {success: false, error: {message: 'E_LOCKED: the page is locked by sync '.repeat(4)}}],
+      ['no message', {success: false}],
+      ['success with result:false', {success: true, result: false}],
+    ])('an unsuccessful modify with %s shows the short message, logs the full one, and stays open', async (_l, res) => {
       api.modifyLassoGeometry.mockResolvedValue(res);
       const tree = await mount();
       await done(tree, WIDER);
-      expect(handles(tree).message).toBe(msg);
+      expect(handles(tree).message).toBe(RESIZE_FAILED_MESSAGE);
+      expect(consoleErrorSpy).toHaveBeenCalledWith('[EDIT_SHAPE] modifyLassoGeometry failed:', JSON.stringify(res));
       expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(true);
       expect(closeView).not.toHaveBeenCalled();
     });
 
-    it('a throwing modify shows its message and a retry succeeds', async () => {
-      api.modifyLassoGeometry.mockRejectedValueOnce(new Error('bridge down'));
+    it('a throwing modify shows the short message, logs the error, and a retry succeeds', async () => {
+      const err = new Error('bridge down');
+      api.modifyLassoGeometry.mockRejectedValueOnce(err);
       const tree = await mount();
       await done(tree, WIDER);
-      expect(handles(tree).message).toBe('bridge down');
+      expect(handles(tree).message).toBe(RESIZE_FAILED_MESSAGE);
+      expect(consoleErrorSpy).toHaveBeenCalledWith('[EDIT_SHAPE] modifyLassoGeometry failed:', err);
       await done(tree, WIDER);
       expect(api.modifyLassoGeometry).toHaveBeenCalledTimes(2);
       expect(closeView).toHaveBeenCalledTimes(1);
     });
 
-    it('a non-Error rejection falls back to "Resize failed"', async () => {
+    it('a non-Error rejection shows the short message too', async () => {
       api.modifyLassoGeometry.mockRejectedValueOnce('nope');
       const tree = await mount();
       await done(tree, WIDER);
-      expect(handles(tree).message).toBe('Resize failed');
+      expect(handles(tree).message).toBe(RESIZE_FAILED_MESSAGE);
     });
 
     it('the message clears after 2 s; a second error restarts the timer; unmount clears it', async () => {
-      api.modifyLassoGeometry.mockResolvedValue({success: false, error: {message: 'first'}});
+      api.modifyLassoGeometry.mockResolvedValue({success: false});
       const tree = await mount();
       await done(tree, WIDER);
       act(() => { jest.advanceTimersByTime(1500); });
-      api.modifyLassoGeometry.mockResolvedValue({success: false, error: {message: 'second'}});
       await done(tree, WIDER);
       // The first timer would have cleared the message at 2000 ms.
       act(() => { jest.advanceTimersByTime(1000); });
-      expect(handles(tree).message).toBe('second');
+      expect(handles(tree).message).toBe(RESIZE_FAILED_MESSAGE);
       act(() => { jest.advanceTimersByTime(1000); });
       expect(handles(tree).message).toBeNull();
       await done(tree, WIDER);
