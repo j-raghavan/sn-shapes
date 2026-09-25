@@ -2,6 +2,7 @@ import React, {useEffect, useState} from 'react';
 import ShapePalette from './src/ShapePalette';
 import ShapeOptionsPanel from './src/ShapeOptionsPanel';
 import {
+  ButtonEvent,
   getLastButtonEvent,
   installPluginRouter,
   subscribeToButtonEvents,
@@ -15,6 +16,18 @@ import {
 // listener confirmed installed.
 installPluginRouter();
 
+type Route = {
+  view: ReturnType<typeof viewForButtonId>;
+  /** Bumped per button event; keys the Edit Shape panel. */
+  session: number;
+  /** The event this route was derived from, for reconciliation. */
+  source: ButtonEvent | null;
+};
+
+function routeFor(event: ButtonEvent | null, session: number): Route {
+  return {view: viewForButtonId(event?.id), session, source: event};
+}
+
 /**
  * Two views, chosen by the button that opened the plugin: the sidebar
  * "Shapes" button (id 100) opens the Shapes popup, the lasso-toolbar
@@ -23,27 +36,29 @@ installPluginRouter();
  * The initial view is read lazily from the router's cached last event so
  * the first render is already correct (sn-plugin-lib replays the event to
  * new listeners asynchronously; without the lazy read the palette would
- * flash first). Every later event bumps `session`, which keys the view so
- * it remounts: each press re-reads the current lasso instead of showing a
- * previous session's state.
+ * flash first). The subscription only starts in the effect, so an event
+ * delivered between that read and the subscription would be lost — the
+ * effect therefore re-reads the last event once subscribed.
+ *
+ * Only the Edit Shape panel is keyed on `session`: every lasso press must
+ * re-read the current selection, whereas the palette keeps its state
+ * (selection, style, checkbox) across repeated sidebar presses.
  */
 export default function App(): React.JSX.Element {
-  const [route, setRoute] = useState(() => ({
-    view: viewForButtonId(getLastButtonEvent()?.id),
-    session: 0,
-  }));
+  const [route, setRoute] = useState<Route>(() => routeFor(getLastButtonEvent(), 0));
 
-  useEffect(
-    () =>
-      subscribeToButtonEvents(event =>
-        setRoute(r => ({view: viewForButtonId(event.id), session: r.session + 1})),
-      ),
-    [],
-  );
+  useEffect(() => {
+    const unsubscribe = subscribeToButtonEvents(event =>
+      setRoute(r => routeFor(event, r.session + 1)),
+    );
+    const latest = getLastButtonEvent();
+    setRoute(r => (latest && latest !== r.source ? routeFor(latest, r.session + 1) : r));
+    return unsubscribe;
+  }, []);
 
   return route.view === 'editShape' ? (
     <ShapeOptionsPanel key={route.session} />
   ) : (
-    <ShapePalette key={route.session} />
+    <ShapePalette />
   );
 }

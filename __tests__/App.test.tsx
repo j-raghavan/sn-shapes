@@ -9,12 +9,15 @@ import {create, act, ReactTestRenderer} from 'react-test-renderer';
 type Listener = (event: {id: number}) => void;
 let mockLastEvent: {id: number} | null = null;
 let mockListener: Listener | null = null;
+// Simulates an event the host delivers while App subscribes (A2 race).
+let mockOnSubscribe: (() => void) | null = null;
 
 jest.mock('../src/pluginRouter', () => ({
   ...jest.requireActual('../src/pluginRouter'),
   installPluginRouter: jest.fn(),
   getLastButtonEvent: () => mockLastEvent,
   subscribeToButtonEvents: (fn: Listener) => {
+    mockOnSubscribe?.();
     mockListener = fn;
     return () => {
       mockListener = null;
@@ -35,6 +38,7 @@ jest.mock('sn-plugin-lib', () => ({
 }));
 
 import App from '../App';
+import {Text} from 'react-native';
 import {TEST_IDS as PALETTE_IDS} from '../src/ShapePalette';
 import {TEST_IDS as EDIT_IDS} from '../src/ShapeOptionsPanel';
 import {PluginCommAPI} from 'sn-plugin-lib';
@@ -59,7 +63,9 @@ async function mount(): Promise<ReactTestRenderer> {
 
 async function press(id: number) {
   await act(async () => {
-    mockListener!({id});
+    // The real router records the event before fanning it out.
+    mockLastEvent = {id};
+    mockListener!(mockLastEvent);
     await flushPromises();
     await flushPromises();
   });
@@ -69,6 +75,7 @@ let logSpy: jest.SpyInstance;
 beforeEach(() => {
   mockLastEvent = null;
   mockListener = null;
+  mockOnSubscribe = null;
   (PluginCommAPI.getLassoGeometries as jest.Mock).mockClear();
   logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -99,7 +106,7 @@ describe('App routing (AC8.2)', () => {
     expect(has(tree, EDIT_IDS.panel)).toBe(false);
   });
 
-  it('remounts the view on a repeated press so the lasso is read again', async () => {
+  it('remounts Edit Shape on a repeated lasso press so the lasso is read again', async () => {
     mockLastEvent = {id: 200};
     await mount();
     expect(PluginCommAPI.getLassoGeometries).toHaveBeenCalledTimes(1);
@@ -112,5 +119,35 @@ describe('App routing (AC8.2)', () => {
     expect(mockListener).not.toBeNull();
     act(() => tree.unmount());
     expect(mockListener).toBeNull();
+  });
+
+  it('A1: a repeated sidebar press keeps the palette state (no remount)', async () => {
+    const tree = await mount();
+    const label = () => tree.root.findByProps({testID: PALETTE_IDS.groupLabel}).findByType(Text).props.children;
+    const before = label();
+    await act(async () => {
+      tree.root.findByProps({testID: PALETTE_IDS.groupNext}).props.onPress();
+      await flushPromises();
+    });
+    const moved = label();
+    expect(moved).not.toBe(before);
+    await press(100);
+    expect(label()).toBe(moved);
+  });
+
+  it('A2: an event delivered before the subscription lands is not lost', async () => {
+    mockOnSubscribe = () => {
+      mockLastEvent = {id: 200};
+    };
+    const tree = await mount();
+    expect(has(tree, EDIT_IDS.panel)).toBe(true);
+  });
+
+  it('A2: reconciling with the event already routed changes nothing', async () => {
+    mockLastEvent = {id: 200};
+    await mount();
+    // The lazy read and the post-subscribe read see the same event, so the
+    // panel mounts once and reads the lasso once.
+    expect(PluginCommAPI.getLassoGeometries).toHaveBeenCalledTimes(1);
   });
 });
