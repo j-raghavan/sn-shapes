@@ -169,13 +169,13 @@ describe('PlacementOverlay', () => {
       expect(reference(mount(undefined, null).tree)).toHaveLength(0);
     });
 
-    it('AC6.2: draws a static 2 px outline at the page rect converted to dp', () => {
+    it('AC6.2: draws a static 1 px outline (distinct from the 2 px band) at the page rect in dp', () => {
       const {tree} = mount(undefined, {left: 200, top: 400, right: 600, bottom: 500});
       const [node] = reference(tree);
       expect(node.props.pointerEvents).toBe('none');
       const flat = Object.assign({}, ...[node.props.style].flat());
       expect(flat).toMatchObject({
-        position: 'absolute', borderWidth: 2, borderStyle: 'solid',
+        position: 'absolute', borderWidth: 1, borderStyle: 'solid',
         left: 100, top: 200, width: 200, height: 50,
       });
     });

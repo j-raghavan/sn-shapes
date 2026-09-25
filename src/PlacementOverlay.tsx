@@ -155,7 +155,7 @@ export default function PlacementOverlay({
         <View
           testID={OVERLAY_TEST_IDS.referenceRect}
           pointerEvents="none"
-          style={[styles.rubberBand, boxStyle(reference)]}
+          style={[styles.referenceRect, boxStyle(reference)]}
         />
       )}
       {rubberBand && (
@@ -186,11 +186,20 @@ const styles = StyleSheet.create({
   },
   // Drag feedback only — insertion never reads this view. Solid, not
   // dashed: e-ink partial refresh drops dash segments. 2 px so it
-  // survives the panel's greyscale rendering. Also used for the
-  // reference outline.
+  // survives the panel's greyscale rendering.
   rubberBand: {
     position: 'absolute',
     borderWidth: 2,
+    borderStyle: 'solid',
+    borderColor: '#000000',
+  },
+  // Static outline of what is there now: 1 px so it reads as distinct
+  // from the 2 px live band (still solid — e-ink drops dash segments).
+  // Callers pass the lasso rect, which includes stroke padding, so a box
+  // drawn over the outline yields a slightly larger shape by design.
+  referenceRect: {
+    position: 'absolute',
+    borderWidth: 1,
     borderStyle: 'solid',
     borderColor: '#000000',
   },
