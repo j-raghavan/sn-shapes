@@ -45,7 +45,7 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 
 The Supernote's own lasso handle keeps a shape's proportions and scales its stroke width with it. To stretch a shape to any width and height without that:
 
-1. Lasso the shape, then tap **Shapes** in the lasso toolbar. The lasso box is replaced by the shape's box with eight handles, and a **Cancel** / **Done** bar at the top or bottom of the screen. The box sits on the shape's outline, not on the outer edge of a thick stroke.
+1. Lasso the shape, then tap **Shapes** in the lasso toolbar. The lasso box is replaced by the shape's box with eight handles, and a small **Cancel** | **Done** toolbar just below the shape (above it near the bottom of the page). The toolbar hides while you drag and comes back where the shape lands. The box sits on the shape's outline, not on the outer edge of a thick stroke.
 2. Drag a handle. The **corners** stretch width and height freely; the **edges** stretch one direction only (left/right for width, top/bottom for height). Drag **inside the box** to move it. A **line** shows its two ends instead; drag either end anywhere. For a very small shape, touch its centre to move it, or pull a corner to make it bigger.
 3. Adjust as often as you like; only the box moves while you drag. Tap **Done** to redraw the shape in the new box, or **Cancel** to leave it as it was. A circle becomes an ellipse if the box isn't square.
 

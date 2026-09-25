@@ -85,9 +85,13 @@ never throw; each result is logged as `[EDIT_SHAPE] lassoBox`. DEVICE-UNVERIFIED
 
 **D5 — Handle gesture (supersedes the draw-a-new-box gesture).** A full-screen responder (`ResizeHandlesOverlay`)
 shows the shape's box with eight 14 dp filled handles: corners stretch both axes freely, edges one axis, a drag inside
-the box moves it. A `straightLine` shows two endpoint handles joined by a segment; each endpoint drags freely. A bar
-with **Cancel**, a hint and **Done** sits on whichever side of the screen, top or bottom, has more clearance from the
-drawn handles (top on a tie, so a shape as tall as the page keeps its bottom handles reachable). Hit-testing and drag
+the box moves it. A `straightLine` shows two endpoint handles joined by a segment; each endpoint drags freely. A
+compact **Cancel | Done** toolbar floats next to the shape, like the firmware lasso toolbar (`toolbarPlacement`, pure):
+centred just below the shape's drawn bounds (a line's endpoint box), with a gap wider than the handles' hit area so it
+never covers a handle; above the shape with the same gap when there is no room below; inside the box at its top when
+neither side has room (a shape as tall as the page); always clamped on screen. It hides while a handle is held (fewer
+e-ink redraws, nothing under the pen) and reappears where the shape lands. Its touches never start a handle drag;
+everywhere else the overlay hit-tests. Hit-testing and drag
 math are pure (`resizeHandles.ts`): the pen grabs a handle within 40 page px (shrinking on small boxes). Priority is
 centre → corner → edge → inside: within half the hit distance of the centre is always move, so a tiny box can still be
 moved; a corner grows it. Drags are computed absolutely from the pen-down snapshot, so the 40 ms render throttle cannot
@@ -113,7 +117,7 @@ an estimate, so a Done that moves only some sides may shift the untouched ones b
 handles as its points. The full geometry is re-sent, so pen props go back with the new coordinates; the stroke is
 rewritten at the stored pen width (a natively scaled stroke snaps back to it). Success closes the plugin view.
 Failure — including `success: true` with `result: false`, which the SDK documents as "update failed" — shows the
-error in the bar for 2 s and keeps the handles where the user left them, so Done can be retried. Cancel, Done and new
+error as a line in the toolbar for 2 s and keeps the handles where the user left them, so Done can be retried. Cancel, Done and new
 gestures are ignored while the write is in flight. A `[EDIT_SHAPE] frame` log line records `N`, `L`, the pending flag
 and the start box.
 
@@ -156,7 +160,8 @@ checkbox and the handle resize.
     native resize and after a native move, with the handles lined up on the visible shape;
   - that `getLassoGeometries` still returns pre-resize coordinates after a native resize on current firmware;
   - handle size and hit area with the pen (including moving a tiny shape by its centre), legibility of the 40 ms box
-    updates, and which side the bar takes on a tall shape;
+    updates, and where the floating toolbar lands (below, above near the page bottom, inside on a page-tall
+    shape) and that it stays clear of the handles;
   - Cancel and unchanged Done write nothing; circle → ellipse accepted; colour, width and pen type kept; shape +
     handwriting refused.
 - Out of scope: changing the native handle; multi-shape resize; rotating; moving a line as a whole;
@@ -191,3 +196,5 @@ Small departures from the design sketch, each the minimal sound fix:
   side with more clearance; firmware lasso box hidden while the handles are up; mixed counts refused even without
   `geometryNum`; separate "Couldn't read the lassoed shape." message; a centre move area for tiny boxes; flat shapes
   offer one axis; line endpoints kept apart; setup errors caught.
+- 2026-09-25 (owner): the screen-edge Cancel / Done bar is replaced by a compact toolbar floating next to the shape,
+  hidden while a handle is held.
