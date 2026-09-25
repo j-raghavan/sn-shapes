@@ -70,12 +70,10 @@ import {
   StyleSheet,
   ImageSourcePropType,
   ScrollView,
-  PixelRatio,
 } from 'react-native';
 import {
   PluginCommAPI,
   PluginManager,
-  PluginFileAPI,
 } from 'sn-plugin-lib';
 import {
   SHAPES,
@@ -104,6 +102,13 @@ import {
   getDefaultFavoritesStorage,
 } from './favoritesStorage';
 import {
+  ApiRes,
+  DEFAULT_PAGE_HEIGHT,
+  DEFAULT_PAGE_WIDTH,
+  TOUCH_SCALE,
+  resolvePageSize,
+} from './pageSize';
+import {
   DEFAULT_PREFERENCES,
   PreferencesStorage,
   getDefaultPreferencesStorage,
@@ -123,8 +128,8 @@ import {
 // Types & constants
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_PAGE_WIDTH = 1404;
-export const DEFAULT_PAGE_HEIGHT = 1872;
+// Re-exported so existing importers keep resolving them from here.
+export {DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT};
 
 export const TEST_IDS = {
   overlay: OVERLAY_TEST_IDS.overlay,
@@ -312,49 +317,9 @@ const GRID_HEIGHT_PX =
   (MAX_GRID_ROWS - 1) * GRID_GAP +
   GRID_VERTICAL_PADDING_PX;
 
-// Local narrow type for sn-plugin-lib responses. The SDK declares its
-// methods as returning the generic `Object` type, so TS doesn't know
-// about the `{success, result}` envelope the firmware actually returns.
-type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | null | undefined;
-
-// dp → page px. `sn-plugin-lib` documents geometry points as Android
-// screen px and RN reports touches in dp (px / density), so one multiply
-// recovers the firmware coordinate space. Constant per device, hence
-// module-level (ADR-PEN-PLACEMENT D2). DEVICE-UNVERIFIED on Manta.
-const TOUCH_SCALE = PixelRatio.get();
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function resolvePageSize(): Promise<{width: number; height: number}> {
-  try {
-    // Fire both independent calls concurrently; getPageSize waits for both.
-    const [pathRaw, pageRaw] = await Promise.all([
-      PluginCommAPI.getCurrentFilePath(),
-      PluginCommAPI.getCurrentPageNum(),
-    ]);
-    const pathRes = pathRaw as ApiRes<string>;
-    const pageRes = pageRaw as ApiRes<number>;
-    if (
-      pathRes?.success &&
-      pageRes?.success &&
-      typeof pathRes.result === 'string' &&
-      typeof pageRes.result === 'number'
-    ) {
-      const sizeRes = (await PluginFileAPI.getPageSize(
-        pathRes.result,
-        pageRes.result,
-      )) as ApiRes<{width: number; height: number}>;
-      if (sizeRes?.success && sizeRes.result) {
-        return sizeRes.result;
-      }
-    }
-  } catch {
-    // Fall through to defaults.
-  }
-  return {width: DEFAULT_PAGE_WIDTH, height: DEFAULT_PAGE_HEIGHT};
-}
 
 /**
  * Insert a shape at the pen's placement target with the user's chosen
