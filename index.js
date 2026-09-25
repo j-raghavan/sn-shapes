@@ -72,13 +72,13 @@ PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE'], {
   showType: SHOW_TYPE_WITH_UI,
 });
 
-// Lasso-toolbar "Shapes" button (#17): opens the Edit Shape panel, whose
-// Resize freely stretches the lassoed shape without keeping its aspect
-// ratio — the one thing the firmware lasso handle cannot do.
+// Lasso-toolbar "Shapes" button (#17): opens Edit Shape straight into
+// resize handles, which stretch the lassoed shape without keeping its
+// aspect ratio — the one thing the firmware lasso handle cannot do.
 // Payload mirrors the device-verified id=200 registration from April
-// (no showType; the SDK's PluginEditButton does not define one).
-// DEVICE-UNVERIFIED on current Chauvet: visibility and placement (bar vs
-// overflow menu).
+// (no showType; the SDK's PluginEditButton does not define one; the host
+// fills showType=1). Verified 2026-09-24 on Chauvet: listed for
+// geometry lassos in the main lasso toolbar row (menuLevel=1).
 PluginManager.registerButton(BUTTON_TYPE_LASSO_TOOLBAR, ['NOTE'], {
   id: BUTTON_ID_LASSO,
   name: 'Shapes',

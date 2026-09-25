@@ -1,28 +1,30 @@
 /**
- * ShapeOptionsPanel — the "Edit Shape" panel behind the lasso-toolbar
+ * ShapeOptionsPanel — Edit Shape's free resize behind the lasso-toolbar
  * Shapes button (id 200, #17, ADR-FREE-RESIZE).
  *
  * The firmware lasso handle keeps a shape's aspect ratio and scales its
- * stroke; the plugin cannot change that. This panel offers the one thing
- * the handle cannot do — **Resize freely**: the user drags a new box and
- * the lassoed geometry is rewritten to fill it, at the same stroke width.
+ * stroke; the plugin cannot change that. This view opens straight into
+ * resize handles on the lassoed shape instead: corners stretch both axes
+ * freely, edges one axis, the inside moves it, a line gets its two
+ * endpoints. Nothing is written until Done.
  *
  * Flow:
  *   1. On mount, read lasso counts, geometries and rect plus the page size
- *      in parallel. Until they resolve the panel shows Loading… and offers
- *      no action, so nothing can act on a half-read selection.
- *   2. Exactly one geometry and nothing else → Resize freely; anything else
- *      → "Select a single shape to resize." A failed counts read degrades
- *      to the geometry list; a failed rect read to the natural bounds.
- *   3. Resize freely swaps the panel for a full-screen PlacementOverlay
- *      that outlines the current bounds. A drag remaps the stored geometry
- *      onto the box (`resizeGeometryTo`) and writes it with
- *      `modifyLassoGeometry`, re-sending every pen prop. A tap is ignored.
- *   4. Success closes the plugin view. Failure returns to the panel with an
- *      error banner and leaves the shape untouched.
+ *      in parallel. Until they resolve a Loading… card shows and no handle
+ *      exists, so nothing can act on a half-read selection.
+ *   2. Exactly one geometry and nothing else, with a resizable frame
+ *      (`resizeFrame`) → the handles (`ResizeHandlesOverlay`). Otherwise a
+ *      card says why. A failed counts read degrades to the geometry list;
+ *      a failed rect read to the stored bounds.
+ *   3. Done with the box unchanged, or Cancel, closes without writing. A
+ *      changed box is remapped from the stored geometry (`applyResize`) and
+ *      written with `modifyLassoGeometry`, re-sending every pen prop.
+ *   4. Success closes the plugin view. Failure shows in the handles bar,
+ *      keeps the handles where the user left them, and leaves the shape
+ *      untouched, so Done can be retried.
  *
- * DEVICE-UNVERIFIED (ADR-FREE-RESIZE): lasso stays active while the view is
- * open; modifyLassoGeometry keeps pen props and accepts circle → ellipse.
+ * DEVICE-UNVERIFIED (ADR-FREE-RESIZE): where the handles open after a
+ * native lasso resize (see the `[EDIT_SHAPE] frame` log); circle → ellipse.
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {View, Text, Pressable, StyleSheet} from 'react-native';
@@ -31,40 +33,32 @@ import {
   Geometry,
   LassoCounts,
   Rect,
-  geometryNaturalBounds,
   countsAreUsable,
   isSingleGeometrySelection,
 } from './lassoTransform';
-import {
-  ApiRes,
-  DEFAULT_PAGE_HEIGHT,
-  DEFAULT_PAGE_WIDTH,
-  TOUCH_SCALE,
-  resolvePageSize,
-} from './pageSize';
-import {PageSize, PlacementTarget, resizeGeometryTo} from './placement';
-import PlacementOverlay from './PlacementOverlay';
+import {ApiRes, TOUCH_SCALE, resolvePageSize} from './pageSize';
+import {PageSize} from './placement';
+import ResizeHandlesOverlay from './ResizeHandlesOverlay';
+import {applyResize, editsEqual, ResizeEdit, ResizeFrame, resizeFrame} from './resizeHandles';
 
 export const TEST_IDS = {
-  // Outer full-screen Pressable in panel mode (tap outside = close).
+  // Outer full-screen Pressable behind a card (tap outside = close).
   overlay: 'edit-shape-overlay',
-  panel: 'edit-shape-panel',
+  card: 'edit-shape-card',
   close: 'edit-shape-close',
   loading: 'edit-shape-loading',
   unsupported: 'edit-shape-unsupported',
-  resize: 'edit-shape-resize',
-  resizeHint: 'edit-shape-resize-hint',
-  resizeCancel: 'edit-shape-resize-cancel',
-  error: 'edit-shape-error',
+  unresizable: 'edit-shape-unresizable',
 } as const;
 
 export const UNSUPPORTED_MESSAGE = 'Select a single shape to resize.';
-export const RESIZE_HINT = 'Drag a new box. Tap ✕ to cancel.';
-export const TAP_HINT = 'Drag to draw the new size';
+export const UNRESIZABLE_MESSAGE = "Can't resize this shape.";
 
 const ERROR_DISPLAY_MS = 2000;
 
-type Mode = 'loading' | 'unsupported' | 'ready' | 'resizing';
+type State =
+  | {mode: 'loading' | 'unsupported' | 'unresizable'}
+  | {mode: 'resizing'; geometry: Geometry; frame: ResizeFrame; page: PageSize};
 
 function isGeometry(x: unknown): x is Geometry {
   if (!x || typeof x !== 'object') {return false;}
@@ -128,13 +122,10 @@ async function readLassoCounts(): Promise<LassoCounts | null> {
 export type ShapeOptionsPanelProps = {scale?: number};
 
 export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPanelProps) {
-  const [mode, setMode] = useState<Mode>('loading');
-  const [geometry, setGeometry] = useState<Geometry | null>(null);
-  const [lassoRect, setLassoRect] = useState<Rect | null>(null);
-  const [page, setPage] = useState<PageSize>({width: DEFAULT_PAGE_WIDTH, height: DEFAULT_PAGE_HEIGHT});
+  const [state, setState] = useState<State>({mode: 'loading'});
   const [error, setError] = useState<string | null>(null);
-  // busyRef is the synchronous guard (a second release in the same tick);
-  // `busy` drives the UI so ✕ is disabled while a modify is in flight.
+  // busyRef is the synchronous guard (a second Done in the same tick);
+  // `busy` drives the UI so the handles and buttons go inert meanwhile.
   const busyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -142,19 +133,26 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
   useEffect(() => {
     let cancelled = false;
     Promise.all([readLassoCounts(), readLassoGeometries(), readLassoRect(), resolvePageSize()])
-      .then(([counts, geometries, rect, size]) => {
+      .then(([counts, geometries, rect, page]) => {
         if (cancelled) {return;}
-        setPage(size);
-        setLassoRect(rect);
         if (!countsAreUsable(counts)) {
           console.warn('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
         }
-        if (geometries && isSingleGeometrySelection(counts, geometries.length)) {
-          setGeometry(geometries[0]);
-          setMode('ready');
-        } else {
-          setMode('unsupported');
+        if (!geometries || !isSingleGeometrySelection(counts, geometries.length)) {
+          setState({mode: 'unsupported'});
+          return;
         }
+        const geometry = geometries[0];
+        const frame = resizeFrame(geometry, rect);
+        if (!frame) {
+          setState({mode: 'unresizable'});
+          return;
+        }
+        // Device probe for where the handles open (ADR-FREE-RESIZE).
+        console.log('[EDIT_SHAPE] frame', JSON.stringify({
+          natural: frame.stored, lassoRect: rect, pending: frame.pending, start: frame.start,
+        }));
+        setState({mode: 'resizing', geometry, frame, page});
       });
     return () => {
       cancelled = true;
@@ -168,30 +166,23 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
     errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
   }, []);
 
-  // Closing mid-modify would drop the result on the floor (no banner if
+  // Closing mid-modify would drop the result on the floor (no message if
   // it fails), so every close path is ignored while one is in flight.
   const close = useCallback(() => {
     if (busyRef.current) {return;}
     PluginManager.closePluginView();
   }, []);
 
-  const startResize = useCallback(() => {
-    setError(null);
-    setMode('resizing');
-  }, []);
-
-  const handleResizeCommit = useCallback(async (target: PlacementTarget) => {
-    if (!geometry || busyRef.current) {return;}
-    // A tap has no box to stretch into: say so in the hint bar and keep
-    // waiting for a drag.
-    if (target.kind !== 'drag') {
-      showError(TAP_HINT);
+  const handleDone = useCallback(async (geometry: Geometry, frame: ResizeFrame, edit: ResizeEdit) => {
+    if (busyRef.current) {return;}
+    // Unchanged: nothing to write, whatever the start-box estimate was.
+    if (editsEqual(edit, frame.start)) {
+      PluginManager.closePluginView();
       return;
     }
-    const next = resizeGeometryTo(geometry, target);
+    const next = applyResize(geometry, edit);
     if (!next) {
-      showError("Can't resize this shape");
-      setMode('ready');
+      showError(UNRESIZABLE_MESSAGE);
       return;
     }
     busyRef.current = true;
@@ -204,88 +195,55 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
       // `success: true`.
       if (!res?.success || res.result === false) {
         showError(res?.error?.message ?? 'Resize failed');
-        setMode('ready');
         return;
       }
       console.log('[EDIT_SHAPE] modifyLassoGeometry', JSON.stringify(res));
       PluginManager.closePluginView();
     } catch (e) {
       showError(e instanceof Error ? e.message : 'Resize failed');
-      setMode('ready');
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
-  }, [geometry, showError]);
+  }, [showError]);
 
-  if (mode === 'resizing' && geometry) {
+  if (state.mode === 'resizing') {
+    const {geometry, frame} = state;
     return (
-      <PlacementOverlay
-        page={page}
+      <ResizeHandlesOverlay
+        start={frame.start}
+        page={state.page}
         scale={scale}
-        onCommit={handleResizeCommit}
-        referenceRect={lassoRect ?? geometryNaturalBounds(geometry)}>
-        <Pressable
-          testID={TEST_IDS.resizeHint}
-          style={styles.hintBar}
-          onPress={e => e.stopPropagation()}>
-          {/* The banner mechanism doubles as a transient hint here. */}
-          <Text style={styles.hintText}>{error ?? RESIZE_HINT}</Text>
-          <Pressable
-            testID={TEST_IDS.resizeCancel}
-            onPress={close}
-            disabled={busy}
-            style={({pressed}) => [styles.closeBtn, pressed && styles.closeBtnPressed]}>
-            <Text style={styles.closeText}>✕</Text>
-          </Pressable>
-        </Pressable>
-      </PlacementOverlay>
+        busy={busy}
+        message={error}
+        onCancel={close}
+        onDone={edit => handleDone(geometry, frame, edit)}
+      />
     );
   }
 
+  const cards = {
+    loading: {testID: TEST_IDS.loading, text: 'Loading…'},
+    unsupported: {testID: TEST_IDS.unsupported, text: UNSUPPORTED_MESSAGE},
+    unresizable: {testID: TEST_IDS.unresizable, text: UNRESIZABLE_MESSAGE},
+  };
+  const card = cards[state.mode];
   return (
     <Pressable testID={TEST_IDS.overlay} style={styles.container} onPress={close}>
-      <Pressable testID={TEST_IDS.panel} style={styles.panel} onPress={e => e.stopPropagation()}>
+      <Pressable testID={TEST_IDS.card} style={styles.card} onPress={e => e.stopPropagation()}>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Edit Shape</Text>
+          <Text style={styles.title}>Resize Shape</Text>
           <Pressable
             testID={TEST_IDS.close}
             onPress={close}
-            disabled={busy}
-            style={({pressed}) => [styles.closeBtn, styles.headerClose, pressed && styles.closeBtnPressed]}>
+            style={({pressed}) => [styles.closeBtn, pressed && styles.closeBtnPressed]}>
             <Text style={styles.closeText}>✕</Text>
           </Pressable>
         </View>
         <View style={styles.divider} />
-
-        {error && (
-          <View testID={TEST_IDS.error} style={styles.errorBanner}>
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        )}
-
-        {mode === 'loading' && (
-          <View testID={TEST_IDS.loading} style={styles.centerRow}>
-            <Text style={styles.helperText}>Loading…</Text>
-          </View>
-        )}
-
-        {mode === 'unsupported' && (
-          <View testID={TEST_IDS.unsupported} style={styles.centerRow}>
-            <Text style={styles.helperText}>{UNSUPPORTED_MESSAGE}</Text>
-          </View>
-        )}
-
-        {mode === 'ready' && (
-          <View style={styles.body}>
-            <Pressable
-              testID={TEST_IDS.resize}
-              onPress={startResize}
-              style={({pressed}) => [styles.actionBtn, pressed && styles.actionBtnPressed]}>
-              <Text style={styles.actionText}>⤡  Resize freely</Text>
-            </Pressable>
-          </View>
-        )}
+        <View testID={card.testID} style={styles.centerRow}>
+          <Text style={styles.helperText}>{card.text}</Text>
+        </View>
       </Pressable>
     </Pressable>
   );
@@ -300,13 +258,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  panel: {
+  card: {
     width: 280,
     backgroundColor: '#FFFFFF',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#000000',
-    paddingBottom: PANEL_PADDING,
   },
   headerRow: {
     paddingHorizontal: PANEL_PADDING,
@@ -322,6 +279,8 @@ const styles = StyleSheet.create({
     color: '#000000',
   },
   closeBtn: {
+    position: 'absolute',
+    right: PANEL_PADDING,
     width: 22,
     height: 22,
     borderRadius: 11,
@@ -329,10 +288,6 @@ const styles = StyleSheet.create({
     borderColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  headerClose: {
-    position: 'absolute',
-    right: PANEL_PADDING,
   },
   closeBtnPressed: {
     backgroundColor: '#F0F0F0',
@@ -354,58 +309,5 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#555555',
     textAlign: 'center',
-  },
-  errorBanner: {
-    marginHorizontal: PANEL_PADDING,
-    marginTop: 5,
-    backgroundColor: '#1A1A1A',
-    borderRadius: 3,
-    paddingVertical: 4,
-    paddingHorizontal: 6,
-  },
-  errorText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    textAlign: 'center',
-  },
-  body: {
-    paddingHorizontal: PANEL_PADDING,
-    paddingTop: PANEL_PADDING,
-  },
-  actionBtn: {
-    paddingVertical: 10,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: '#000000',
-    alignItems: 'center',
-  },
-  actionBtnPressed: {
-    backgroundColor: '#F0F0F0',
-  },
-  actionText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-  },
-  // Hint bar pinned to the top of the resize overlay. A Pressable that
-  // swallows its own touches so tapping it never reads as a tap-to-place.
-  hintBar: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: PANEL_PADDING,
-    paddingVertical: 8,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#000000',
-  },
-  hintText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
   },
 });

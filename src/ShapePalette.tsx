@@ -50,8 +50,8 @@
  *     2026-04-18, the id=200 button + ShapeOptionsPanel routing were
  *     removed; this popup is now the only entry point for shapes.
  *   - #17 brought id=200 back for the one thing this popup cannot do:
- *     ShapeOptionsPanel.tsx is now the Edit Shape panel (Resize freely
- *     on a lassoed shape). Styling still lives here only; nothing in
+ *     ShapeOptionsPanel.tsx is now Edit Shape (resize handles on a
+ *     lassoed shape). Styling still lives here only; nothing in
  *     ShapePalette imports from ShapeOptionsPanel.
  *
  * Why deferred-apply (instead of tap-to-insert + style after):

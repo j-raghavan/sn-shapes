@@ -87,23 +87,23 @@ describe('App routing (AC8.2)', () => {
   it('shows the palette when no button event has been seen', async () => {
     const tree = await mount();
     expect(has(tree, PALETTE_IDS.panel)).toBe(true);
-    expect(has(tree, EDIT_IDS.panel)).toBe(false);
+    expect(has(tree, EDIT_IDS.card)).toBe(false);
   });
 
   it('shows Edit Shape on first render when the lasso button opened the plugin', async () => {
     mockLastEvent = {id: 200};
     const tree = await mount();
-    expect(has(tree, EDIT_IDS.panel)).toBe(true);
+    expect(has(tree, EDIT_IDS.card)).toBe(true);
     expect(has(tree, PALETTE_IDS.panel)).toBe(false);
   });
 
   it('follows later button events in both directions', async () => {
     const tree = await mount();
     await press(200);
-    expect(has(tree, EDIT_IDS.panel)).toBe(true);
+    expect(has(tree, EDIT_IDS.card)).toBe(true);
     await press(100);
     expect(has(tree, PALETTE_IDS.panel)).toBe(true);
-    expect(has(tree, EDIT_IDS.panel)).toBe(false);
+    expect(has(tree, EDIT_IDS.card)).toBe(false);
   });
 
   it('remounts Edit Shape on a repeated lasso press so the lasso is read again', async () => {
@@ -140,7 +140,7 @@ describe('App routing (AC8.2)', () => {
       mockLastEvent = {id: 200};
     };
     const tree = await mount();
-    expect(has(tree, EDIT_IDS.panel)).toBe(true);
+    expect(has(tree, EDIT_IDS.card)).toBe(true);
   });
 
   it('A2: reconciling with the event already routed changes nothing', async () => {

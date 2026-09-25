@@ -1,9 +1,11 @@
 /**
- * Tests for src/ShapeOptionsPanel — the Edit Shape panel behind the
- * lasso-toolbar Shapes button (#17, SPEC-FREE-RESIZE FR7). Covers the
- * loading → unsupported | ready → resizing state machine, degradation when
- * lasso reads fail, the resize gesture → modifyLassoGeometry path, and the
- * failure / double-release / unmount windows.
+ * Tests for src/ShapeOptionsPanel — Edit Shape's free resize behind the
+ * lasso-toolbar Shapes button (#17, ADR-FREE-RESIZE). Covers the
+ * loading → unsupported | unresizable | resizing state machine, where the
+ * handles open, degradation when lasso reads fail, the Done →
+ * modifyLassoGeometry path, and the failure / busy / unmount windows. The
+ * handle rules live in resizeHandles.test.ts and the gesture wiring in
+ * ResizeHandlesOverlay.test.tsx.
  */
 import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
@@ -30,8 +32,17 @@ const CIRCLE = {
   ellipseAngle: 0,
 };
 
-// Firmware reports the visual bounds, a little larger than the vertices.
+const LINE = {
+  type: 'straightLine',
+  penColor: 0x00,
+  penType: 10,
+  penWidth: 400,
+  points: [{x: 100, y: 500}, {x: 400, y: 500}],
+};
+
+// Firmware reports the visual bounds: the vertices plus stroke padding.
 const LASSO_RECT = {left: 90, top: 90, right: 310, bottom: 310};
+const N = {left: 100, top: 100, right: 300, bottom: 300};
 
 jest.mock('sn-plugin-lib', () => ({
   PluginCommAPI: {
@@ -51,13 +62,13 @@ jest.mock('sn-plugin-lib', () => ({
 }));
 
 import ShapeOptionsPanel, {
-  RESIZE_HINT,
-  TAP_HINT,
   TEST_IDS,
+  UNRESIZABLE_MESSAGE,
   UNSUPPORTED_MESSAGE,
 } from '../src/ShapeOptionsPanel';
-import {OVERLAY_TEST_IDS} from '../src/PlacementOverlay';
+import ResizeHandlesOverlay, {RESIZE_TEST_IDS} from '../src/ResizeHandlesOverlay';
 import {geometryNaturalBounds, Geometry} from '../src/lassoTransform';
+import {ResizeEdit} from '../src/resizeHandles';
 import {PluginCommAPI, PluginFileAPI, PluginManager} from 'sn-plugin-lib';
 
 const SCALE = 2;
@@ -97,19 +108,24 @@ async function press(tree: ReactTestRenderer, testID: string) {
   });
 }
 
-function touch(x: number, y: number) {
-  return {nativeEvent: {pageX: x, pageY: y}};
-}
+const handles = (tree: ReactTestRenderer) => tree.root.findByType(ResizeHandlesOverlay).props;
 
-/** Pen-down / pen-up on the resize overlay, in dp. */
-async function gesture(tree: ReactTestRenderer, down: [number, number], up: [number, number]) {
-  const o = byId(tree, OVERLAY_TEST_IDS.overlay).props;
+async function done(tree: ReactTestRenderer, edit: ResizeEdit) {
   await act(async () => {
-    o.onResponderGrant(touch(...down));
-    await o.onResponderRelease(touch(...up));
+    handles(tree).onDone(edit);
     await flushPromises();
     await flushPromises();
   });
+}
+
+const box = (rect: typeof N): ResizeEdit => ({kind: 'box', rect});
+const WIDER_RECT = {left: 100, top: 100, right: 500, bottom: 300};
+const WIDER = box(WIDER_RECT);
+
+/** The parsed payload of the `[EDIT_SHAPE] frame` log line. */
+function frameLog(spy: jest.SpyInstance) {
+  const call = spy.mock.calls.find(c => c[0] === '[EDIT_SHAPE] frame');
+  return call ? JSON.parse(call[1]) : undefined;
 }
 
 function lastModified(): Geometry {
@@ -121,9 +137,6 @@ let consoleErrorSpy: jest.SpyInstance;
 let consoleLogSpy: jest.SpyInstance;
 let consoleWarnSpy: jest.SpyInstance;
 
-const hintText = (tree: ReactTestRenderer) =>
-  byId(tree, TEST_IDS.resizeHint).findAllByType(Text)[0].props.children;
-
 beforeEach(() => {
   jest.useFakeTimers();
   Object.values(api).forEach(m => m.mockReset());
@@ -131,7 +144,7 @@ beforeEach(() => {
   closeView.mockReset().mockResolvedValue(true);
   api.getLassoGeometries.mockResolvedValue({success: true, result: [SQUARE]});
   api.getLassoRect.mockResolvedValue({success: true, result: LASSO_RECT});
-  api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {geometryNum: 1, trailNum: 0}});
+  api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {polygonNum: 1, geometryNum: 1}});
   api.modifyLassoGeometry.mockResolvedValue({success: true, result: true});
   api.getCurrentFilePath.mockResolvedValue({success: true, result: '/note/a.note'});
   api.getCurrentPageNum.mockResolvedValue({success: true, result: 0});
@@ -150,7 +163,7 @@ afterEach(() => {
 
 describe('ShapeOptionsPanel (Edit Shape)', () => {
   describe('loading and eligibility', () => {
-    it('AC7.1 mid-operation: shows Loading… and no Resize action until reads resolve', async () => {
+    it('mid-operation: a Loading… card and no handles until reads resolve', async () => {
       let resolveGeometries: (v: unknown) => void = () => {};
       api.getLassoGeometries.mockReturnValue(new Promise(r => { resolveGeometries = r; }));
       let tree: ReactTestRenderer;
@@ -159,26 +172,49 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       });
       await act(async () => { await flushPromises(); });
       expect(has(tree!, TEST_IDS.loading)).toBe(true);
-      expect(has(tree!, TEST_IDS.resize)).toBe(false);
+      expect(has(tree!, RESIZE_TEST_IDS.overlay)).toBe(false);
       await act(async () => {
         resolveGeometries({success: true, result: [SQUARE]});
         await flushPromises();
       });
       expect(has(tree!, TEST_IDS.loading)).toBe(false);
-      expect(has(tree!, TEST_IDS.resize)).toBe(true);
+      expect(has(tree!, RESIZE_TEST_IDS.overlay)).toBe(true);
     });
 
-    it('AC7.2: one lone geometry offers Resize freely', async () => {
+    it('a lone shape on a fresh lasso opens straight into handles on its stored bounds', async () => {
       const tree = await mount();
-      expect(has(tree, TEST_IDS.resize)).toBe(true);
-      expect(has(tree, TEST_IDS.unsupported)).toBe(false);
+      expect(handles(tree).start).toEqual(box(N));
+      expect(handles(tree).page).toEqual({width: 1404, height: 1872});
+      expect(handles(tree).scale).toBe(SCALE);
+      expect(has(tree, TEST_IDS.card)).toBe(false);
     });
 
-    it('logs the lasso counts for device diagnosis', async () => {
+    it('a pending native resize opens the handles on the lasso rect, inset', async () => {
+      const lasso = {left: 80, top: 80, right: 420, bottom: 320};
+      api.getLassoRect.mockResolvedValue({success: true, result: lasso});
+      const tree = await mount();
+      // penWidth 500 → tol 13 → inset 6.5 per side.
+      expect(handles(tree).start).toEqual(box({left: 86.5, top: 86.5, right: 413.5, bottom: 313.5}));
+      expect(frameLog(consoleLogSpy)).toEqual({
+        natural: N, lassoRect: lasso, pending: true, start: handles(tree).start,
+      });
+    });
+
+    it('logs the counts and the frame for device diagnosis', async () => {
       await mount();
       expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[EDIT_SHAPE] counts', JSON.stringify({success: true, result: {geometryNum: 1, trailNum: 0}}),
+        '[EDIT_SHAPE] counts', JSON.stringify({success: true, result: {polygonNum: 1, geometryNum: 1}}),
       );
+      expect(frameLog(consoleLogSpy)).toEqual({
+        natural: N, lassoRect: LASSO_RECT, pending: false, start: box(N),
+      });
+    });
+
+    it('a line opens as a line edit on its endpoints', async () => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: [LINE]});
+      api.getLassoRect.mockResolvedValue({success: false});
+      const tree = await mount();
+      expect(handles(tree).start).toEqual({kind: 'line', from: {x: 100, y: 500}, to: {x: 400, y: 500}});
     });
 
     it.each([
@@ -192,45 +228,48 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       ['a malformed geometry', () =>
         api.getLassoGeometries.mockResolvedValue({success: true, result: [{type: 'GEO_polygon'}]})],
       ['a null geometry entry', () => api.getLassoGeometries.mockResolvedValue({success: true, result: [null]})],
-    ])('AC7.2: %s → "Select a single shape to resize."', async (_label, arrange) => {
+    ])('%s → "Select a single shape to resize."', async (_label, arrange) => {
       arrange();
       const tree = await mount();
-      expect(has(tree, TEST_IDS.resize)).toBe(false);
-      const text = byId(tree, TEST_IDS.unsupported).findByType(Text);
-      expect(text.props.children).toBe(UNSUPPORTED_MESSAGE);
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(false);
+      expect(byId(tree, TEST_IDS.unsupported).findByType(Text).props.children).toBe(UNSUPPORTED_MESSAGE);
     });
 
-    it('B: unusable counts fall back to the geometry list and warn', async () => {
+    it.each([
+      ['every point coincident', {...SQUARE, points: [{x: 5, y: 5}, {x: 5, y: 5}]}],
+      ['an unknown geometry type', {...SQUARE, type: 'GEO_mystery'}],
+    ])('a single shape with %s → "Can\'t resize this shape."', async (_label, g) => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: [g]});
+      const tree = await mount();
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(false);
+      expect(byId(tree, TEST_IDS.unresizable).findByType(Text).props.children).toBe(UNRESIZABLE_MESSAGE);
+    });
+
+    it('unusable counts fall back to the geometry list and warn', async () => {
       api.getLassoElementTypeCounts.mockResolvedValue({success: true, result: {trailNum: 4}});
       const tree = await mount();
-      expect(has(tree, TEST_IDS.resize)).toBe(true);
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(true);
       expect(consoleWarnSpy).toHaveBeenCalledWith('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
     });
 
-    it('B: usable counts do not warn', async () => {
+    it('usable counts do not warn', async () => {
       await mount();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
     });
 
-    it('C: a lasso rect with a NaN side falls back to the natural bounds', async () => {
-      api.getLassoRect.mockResolvedValue({success: true, result: {left: 90, top: NaN, right: 310, bottom: 310}});
+    it('a lasso rect with a NaN side degrades to the stored bounds', async () => {
+      api.getLassoRect.mockResolvedValue({success: true, result: {left: 0, top: NaN, right: 900, bottom: 900}});
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      const flat = Object.assign({}, ...[byId(tree, OVERLAY_TEST_IDS.referenceRect).props.style].flat());
-      expect(flat).toMatchObject({left: 50, top: 50, width: 100, height: 100});
+      expect(handles(tree).start).toEqual(box(N));
     });
 
-    it('AC7.3 minimal input: counts and rect reads failing still allow a resize from natural bounds', async () => {
+    it('minimal input: counts and rect reads failing still open handles and resize', async () => {
       api.getLassoElementTypeCounts.mockRejectedValue(new Error('no counts'));
       api.getLassoRect.mockResolvedValue({success: false});
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      const ref = byId(tree, OVERLAY_TEST_IDS.referenceRect);
-      const flat = Object.assign({}, ...[ref.props.style].flat());
-      // Natural bounds 100..300 page px → 50..150 dp at scale 2.
-      expect(flat).toMatchObject({left: 50, top: 50, width: 100, height: 100});
-      await gesture(tree, [100, 100], [300, 200]);
-      expect(geometryNaturalBounds(lastModified())).toEqual({left: 200, top: 200, right: 600, bottom: 400});
+      expect(handles(tree).start).toEqual(box(N));
+      await done(tree, WIDER);
+      expect(geometryNaturalBounds(lastModified())).toEqual(WIDER_RECT);
     });
 
     it.each([
@@ -239,13 +278,13 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
       ['a malformed rect', () => api.getLassoRect.mockResolvedValue({success: true, result: {left: 1}})],
       ['a null rect', () => api.getLassoRect.mockResolvedValue({success: true, result: null})],
       ['a throwing rect read', () => api.getLassoRect.mockRejectedValue(new Error('rect'))],
-    ])('AC7.3: %s degrades instead of blocking', async (_label, arrange) => {
+    ])('%s degrades instead of blocking', async (_label, arrange) => {
       arrange();
       const tree = await mount();
-      expect(has(tree, TEST_IDS.resize)).toBe(true);
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(true);
     });
 
-    it('AC7.6 mid-operation: unmounting while reads are pending updates nothing', async () => {
+    it('mid-operation: unmounting while reads are pending updates nothing', async () => {
       let resolveGeometries: (v: unknown) => void = () => {};
       api.getLassoGeometries.mockReturnValue(new Promise(r => { resolveGeometries = r; }));
       let tree: ReactTestRenderer;
@@ -258,166 +297,139 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
         await flushPromises();
       });
       expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(closeView).not.toHaveBeenCalled();
     });
   });
 
   describe('closing', () => {
     it.each([
       ['the ✕ button', TEST_IDS.close],
-      ['a tap outside the panel', TEST_IDS.overlay],
-    ])('AC7.7: %s closes without modifying', async (_label, id) => {
+      ['a tap outside the card', TEST_IDS.overlay],
+    ])('%s closes without modifying', async (_label, id) => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: [SQUARE, CIRCLE]});
       const tree = await mount();
       await press(tree, id);
       expect(closeView).toHaveBeenCalledTimes(1);
       expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
     });
 
-    it('a tap inside the panel does not close', async () => {
+    it('✕ on the Loading… card closes (nothing has been written)', async () => {
+      api.getLassoGeometries.mockReturnValue(new Promise(() => {}));
+      const tree = await mount();
+      await press(tree, TEST_IDS.close);
+      expect(closeView).toHaveBeenCalledTimes(1);
+    });
+
+    it('a tap inside the card does not close', async () => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: []});
       const tree = await mount();
       const stopPropagation = jest.fn();
-      act(() => byId(tree, TEST_IDS.panel).props.onPress({stopPropagation}));
+      act(() => byId(tree, TEST_IDS.card).props.onPress({stopPropagation}));
       expect(stopPropagation).toHaveBeenCalled();
       expect(closeView).not.toHaveBeenCalled();
     });
 
-    it('AC7.7: ✕ in the resize hint closes without modifying', async () => {
+    it('Cancel on the handles closes without modifying', async () => {
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      const stopPropagation = jest.fn();
-      act(() => byId(tree, TEST_IDS.resizeHint).props.onPress({stopPropagation}));
-      expect(stopPropagation).toHaveBeenCalled();
-      await press(tree, TEST_IDS.resizeCancel);
+      await press(tree, RESIZE_TEST_IDS.cancel);
       expect(closeView).toHaveBeenCalledTimes(1);
       expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
     });
   });
 
-  describe('Resize freely', () => {
-    it('AC7.4: shows the overlay with the current bounds outlined and a hint', async () => {
+  describe('Done', () => {
+    it('an unchanged box closes without writing', async () => {
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      expect(has(tree, TEST_IDS.panel)).toBe(false);
-      expect(has(tree, TEST_IDS.resizeHint)).toBe(true);
-      const ref = byId(tree, OVERLAY_TEST_IDS.referenceRect);
-      const flat = Object.assign({}, ...[ref.props.style].flat());
-      expect(flat).toMatchObject({left: 45, top: 45, width: 110, height: 110});
+      await press(tree, RESIZE_TEST_IDS.done);
+      expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
+      expect(closeView).toHaveBeenCalledTimes(1);
     });
 
-    it('AC7.4: a drag writes the stretched geometry once, keeps pen props, then closes', async () => {
+    it('a box within half a pixel of the start is unchanged too', async () => {
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 60], [450, 110]);
+      await done(tree, box({...N, right: 300.4}));
+      expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
+      expect(closeView).toHaveBeenCalledTimes(1);
+    });
+
+    it('a changed box writes the remapped geometry once with its pen props, then closes', async () => {
+      const tree = await mount();
+      await done(tree, WIDER);
       expect(api.modifyLassoGeometry).toHaveBeenCalledTimes(1);
-      const out = lastModified();
-      expect(geometryNaturalBounds(out)).toEqual({left: 100, top: 120, right: 900, bottom: 220});
-      expect(out).toMatchObject({
-        type: 'GEO_polygon', penColor: SQUARE.penColor, penType: SQUARE.penType, penWidth: SQUARE.penWidth,
-      });
+      const g = lastModified();
+      expect(g).toMatchObject({type: 'GEO_polygon', penColor: 0x9d, penType: 10, penWidth: 500});
+      expect(geometryNaturalBounds(g)).toEqual(WIDER_RECT);
       expect(closeView).toHaveBeenCalledTimes(1);
       expect(consoleLogSpy).toHaveBeenCalledWith(
         '[EDIT_SHAPE] modifyLassoGeometry', JSON.stringify({success: true, result: true}),
       );
     });
 
-    it('lands on the dragged box even when a native resize is pending', async () => {
-      api.getLassoRect.mockResolvedValue({success: true, result: {left: 0, top: 0, right: 900, bottom: 900}});
+    it('end to end: dragging the e handle then Done writes the wider shape', async () => {
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [100, 100], [200, 400]);
-      expect(geometryNaturalBounds(lastModified())).toEqual({left: 200, top: 200, right: 400, bottom: 800});
+      const overlay = () => byId(tree, RESIZE_TEST_IDS.overlay).props;
+      // Stored bounds 100..300 page px → 50..150 dp at scale 2; e handle at (150, 100).
+      act(() => {
+        overlay().onResponderGrant({nativeEvent: {pageX: 150, pageY: 100}});
+        overlay().onResponderRelease({nativeEvent: {pageX: 250, pageY: 100}});
+      });
+      await press(tree, RESIZE_TEST_IDS.done);
+      expect(geometryNaturalBounds(lastModified())).toEqual(WIDER_RECT);
     });
 
-    it('AC5.3: a circle stretched unevenly is written as an ellipse', async () => {
+    it('bakes a pending native resize: stored → edited box', async () => {
+      api.getLassoRect.mockResolvedValue({success: true, result: {left: 80, top: 80, right: 420, bottom: 320}});
+      const tree = await mount();
+      const edited = {left: 86.5, top: 86.5, right: 600, bottom: 313.5};
+      await done(tree, box(edited));
+      expect(geometryNaturalBounds(lastModified())).toEqual(edited);
+    });
+
+    it('a circle stretched unevenly is written as an ellipse', async () => {
       api.getLassoGeometries.mockResolvedValue({success: true, result: [CIRCLE]});
+      api.getLassoRect.mockResolvedValue({success: false});
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [100, 100], [500, 200]);
-      const out = lastModified();
-      expect(out.type).toBe('GEO_ellipse');
-      expect(out.ellipseMajorAxisRadius).toBeCloseTo(400, 6);
-      expect(out.ellipseMinorAxisRadius).toBeCloseTo(100, 6);
+      await done(tree, box({left: 0, top: 0, right: 400, bottom: 100}));
+      expect(lastModified()).toMatchObject({type: 'GEO_ellipse', ellipseMajorAxisRadius: 200, ellipseMinorAxisRadius: 50});
     });
 
-    it('AC7.4/L: a tap does not resize but briefly hints to drag, then the hint returns', async () => {
+    it('a line writes its dragged endpoints', async () => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: [LINE]});
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      expect(hintText(tree)).toBe(RESIZE_HINT);
-      await gesture(tree, [100, 100], [100, 100]);
+      await done(tree, {kind: 'line', from: {x: 100, y: 500}, to: {x: 600, y: 200}});
+      expect(lastModified().points).toEqual([{x: 100, y: 500}, {x: 600, y: 200}]);
+      expect(lastModified().penWidth).toBe(400);
+    });
+
+    it('an edit that cannot be applied shows "Can\'t resize this shape." and keeps the handles', async () => {
+      const tree = await mount();
+      await done(tree, box({left: 300, top: 100, right: 100, bottom: 300}));
       expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
+      expect(handles(tree).message).toBe(UNRESIZABLE_MESSAGE);
       expect(closeView).not.toHaveBeenCalled();
-      expect(hintText(tree)).toBe(TAP_HINT);
-      act(() => { jest.advanceTimersByTime(2000); });
-      expect(hintText(tree)).toBe(RESIZE_HINT);
     });
+  });
 
-    it('E: success with result:false is a failure — banner, back to the panel, no close', async () => {
-      api.modifyLassoGeometry.mockResolvedValueOnce({success: true, result: false});
+  describe('write failures', () => {
+    it.each([
+      ['a firmware message', {success: false, error: {message: 'locked'}}, 'locked'],
+      ['no message', {success: false}, 'Resize failed'],
+      ['success with result:false', {success: true, result: false}, 'Resize failed'],
+    ])('an unsuccessful modify with %s shows it, keeps the handles and stays open', async (_l, res, msg) => {
+      api.modifyLassoGeometry.mockResolvedValue(res);
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
+      await done(tree, WIDER);
+      expect(handles(tree).message).toBe(msg);
+      expect(has(tree, RESIZE_TEST_IDS.overlay)).toBe(true);
       expect(closeView).not.toHaveBeenCalled();
-      expect(has(tree, TEST_IDS.resize)).toBe(true);
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children).toBe('Resize failed');
     });
 
-    it('D: ✕ is disabled and ignored while a modify is in flight', async () => {
-      let resolveModify: (v: unknown) => void = () => {};
-      api.modifyLassoGeometry.mockReturnValueOnce(new Promise(r => { resolveModify = r; }));
-      const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      const o = byId(tree, OVERLAY_TEST_IDS.overlay).props;
-      let pending: Promise<unknown> | undefined;
-      await act(async () => {
-        o.onResponderGrant(touch(50, 50));
-        pending = o.onResponderRelease(touch(300, 100));
-        await flushPromises();
-      });
-      expect(byId(tree, TEST_IDS.resizeCancel).props.disabled).toBe(true);
-      await press(tree, TEST_IDS.resizeCancel);
-      expect(closeView).not.toHaveBeenCalled();
-      await act(async () => {
-        resolveModify({success: false, error: {message: 'nope'}});
-        await pending;
-        await flushPromises();
-      });
-      // Back on the panel with the banner; closing works again.
-      expect(byId(tree, TEST_IDS.close).props.disabled).toBe(false);
-      await press(tree, TEST_IDS.close);
-      expect(closeView).toHaveBeenCalledTimes(1);
-    });
-
-    it('AC7.5: a failed modify shows the firmware message, returns to the panel and stays open', async () => {
-      api.modifyLassoGeometry.mockResolvedValueOnce({success: false, error: {message: 'X'}});
-      const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      expect(closeView).not.toHaveBeenCalled();
-      expect(has(tree, TEST_IDS.resize)).toBe(true);
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children).toBe('X');
-      act(() => { jest.advanceTimersByTime(2000); });
-      expect(has(tree, TEST_IDS.error)).toBe(false);
-    });
-
-    it('AC7.5: an unsuccessful modify without a message falls back to "Resize failed"', async () => {
-      api.modifyLassoGeometry.mockResolvedValueOnce(null);
-      const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children)
-        .toBe('Resize failed');
-    });
-
-    it('AC7.5: a throwing modify shows its message and a retry succeeds', async () => {
+    it('a throwing modify shows its message and a retry succeeds', async () => {
       api.modifyLassoGeometry.mockRejectedValueOnce(new Error('bridge down'));
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children)
-        .toBe('bridge down');
-      expect(closeView).not.toHaveBeenCalled();
-      await press(tree, TEST_IDS.resize);
-      expect(has(tree, TEST_IDS.error)).toBe(false);
-      await gesture(tree, [50, 50], [300, 100]);
+      await done(tree, WIDER);
+      expect(handles(tree).message).toBe('bridge down');
+      await done(tree, WIDER);
       expect(api.modifyLassoGeometry).toHaveBeenCalledTimes(2);
       expect(closeView).toHaveBeenCalledTimes(1);
     });
@@ -425,54 +437,53 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
     it('a non-Error rejection falls back to "Resize failed"', async () => {
       api.modifyLassoGeometry.mockRejectedValueOnce('nope');
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children)
-        .toBe('Resize failed');
+      await done(tree, WIDER);
+      expect(handles(tree).message).toBe('Resize failed');
     });
 
-    it('AC7.6 mid-operation: a second release while modify is pending is ignored', async () => {
-      let resolveModify: (v: unknown) => void = () => {};
-      api.modifyLassoGeometry.mockReturnValueOnce(new Promise(r => { resolveModify = r; }));
+    it('the message clears after 2 s; a second error restarts the timer; unmount clears it', async () => {
+      api.modifyLassoGeometry.mockResolvedValue({success: false, error: {message: 'first'}});
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      const o = byId(tree, OVERLAY_TEST_IDS.overlay).props;
-      let first: Promise<unknown> | undefined;
-      await act(async () => {
-        o.onResponderGrant(touch(50, 50));
-        first = o.onResponderRelease(touch(300, 100));
-        o.onResponderGrant(touch(60, 60));
-        await o.onResponderRelease(touch(310, 110));
-      });
+      await done(tree, WIDER);
+      act(() => { jest.advanceTimersByTime(1500); });
+      api.modifyLassoGeometry.mockResolvedValue({success: false, error: {message: 'second'}});
+      await done(tree, WIDER);
+      // The first timer would have cleared the message at 2000 ms.
+      act(() => { jest.advanceTimersByTime(1000); });
+      expect(handles(tree).message).toBe('second');
+      act(() => { jest.advanceTimersByTime(1000); });
+      expect(handles(tree).message).toBeNull();
+      await done(tree, WIDER);
+      const clearSpy = jest.spyOn(global, 'clearTimeout');
+      act(() => tree.unmount());
+      expect(clearSpy).toHaveBeenCalled();
+      clearSpy.mockRestore();
+    });
+  });
+
+  describe('while a write is in flight', () => {
+    it('the handles go inert, and a second Done and Cancel are ignored', async () => {
+      let resolveModify: (v: unknown) => void = () => {};
+      api.modifyLassoGeometry.mockReturnValue(new Promise(r => { resolveModify = r; }));
+      const tree = await mount();
+      await done(tree, WIDER);
+      expect(handles(tree).busy).toBe(true);
+      await done(tree, box({left: 0, top: 0, right: 50, bottom: 50}));
+      handles(tree).onCancel();
       expect(api.modifyLassoGeometry).toHaveBeenCalledTimes(1);
+      expect(closeView).not.toHaveBeenCalled();
       await act(async () => {
-        resolveModify({success: true});
-        await first;
+        resolveModify({success: true, result: true});
         await flushPromises();
       });
       expect(closeView).toHaveBeenCalledTimes(1);
     });
 
-    it('a geometry whose bounds cannot be determined reports "Can\'t resize this shape"', async () => {
-      api.getLassoGeometries.mockResolvedValue({
-        success: true, result: [{type: 'GEO_mystery', penColor: 0, penType: 10, penWidth: 300}],
-      });
-      api.getLassoRect.mockResolvedValue({success: true, result: LASSO_RECT});
+    it('busy clears after a failure so Done can be retried', async () => {
+      api.modifyLassoGeometry.mockResolvedValueOnce({success: false});
       const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      expect(api.modifyLassoGeometry).not.toHaveBeenCalled();
-      expect(has(tree, TEST_IDS.resize)).toBe(true);
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children)
-        .toBe("Can't resize this shape");
-    });
-
-    it('uses the resolved page size to clamp the drag', async () => {
-      (PluginFileAPI.getPageSize as jest.Mock).mockResolvedValue({success: true, result: {width: 400, height: 400}});
-      const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [900, 900]);
-      expect(geometryNaturalBounds(lastModified())).toEqual({left: 100, top: 100, right: 400, bottom: 400});
+      await done(tree, WIDER);
+      expect(handles(tree).busy).toBe(false);
     });
   });
 
@@ -483,38 +494,21 @@ describe('ShapeOptionsPanel (Edit Shape)', () => {
         tree = create(<ShapeOptionsPanel />);
       });
       await act(async () => { await flushPromises(); await flushPromises(); });
-      expect(has(tree!, TEST_IDS.resize)).toBe(true);
+      expect(has(tree!, RESIZE_TEST_IDS.overlay)).toBe(true);
     });
 
-    it('every button shows a pressed state', async () => {
+    it('uses the resolved page size', async () => {
+      (PluginFileAPI.getPageSize as jest.Mock).mockResolvedValue({success: true, result: {width: 400, height: 400}});
       const tree = await mount();
-      for (const id of [TEST_IDS.close, TEST_IDS.resize]) {
-        const style = byId(tree, id).props.style;
-        expect([style({pressed: true})].flat(3)).toContainEqual({backgroundColor: '#F0F0F0'});
-        expect([style({pressed: false})].flat(3)).not.toContainEqual({backgroundColor: '#F0F0F0'});
-      }
-      await press(tree, TEST_IDS.resize);
-      const style = byId(tree, TEST_IDS.resizeCancel).props.style;
+      expect(handles(tree).page).toEqual({width: 400, height: 400});
+    });
+
+    it('the card ✕ shows a pressed state', async () => {
+      api.getLassoGeometries.mockResolvedValue({success: true, result: []});
+      const tree = await mount();
+      const style = byId(tree, TEST_IDS.close).props.style;
       expect([style({pressed: true})].flat(3)).toContainEqual({backgroundColor: '#F0F0F0'});
       expect([style({pressed: false})].flat(3)).not.toContainEqual({backgroundColor: '#F0F0F0'});
-    });
-
-    it('a second error restarts the banner timer, and unmount clears it', async () => {
-      api.modifyLassoGeometry.mockResolvedValue({success: false, error: {message: 'first'}});
-      const tree = await mount();
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      act(() => { jest.advanceTimersByTime(1500); });
-      api.modifyLassoGeometry.mockResolvedValue({success: false, error: {message: 'second'}});
-      await press(tree, TEST_IDS.resize);
-      await gesture(tree, [50, 50], [300, 100]);
-      // The first timer would have cleared the banner at 2000 ms.
-      act(() => { jest.advanceTimersByTime(1000); });
-      expect(byId(tree, TEST_IDS.error).findByType(Text).props.children).toBe('second');
-      const clearSpy = jest.spyOn(global, 'clearTimeout');
-      act(() => tree.unmount());
-      expect(clearSpy).toHaveBeenCalled();
-      clearSpy.mockRestore();
     });
   });
 });
