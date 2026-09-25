@@ -1,9 +1,12 @@
 /**
  * pluginRouter — single source of truth for plugin button press events.
  *
- * The Supernote plugin host dispatches button events (currently only the
- * main toolbar button id=100 "Shapes" registered in index.js) into React
- * Native via `PluginManager.registerButtonListener`. We install exactly
+ * The Supernote plugin host dispatches button events into React Native via
+ * `PluginManager.registerButtonListener`. index.js registers two buttons,
+ * both named "Shapes": the sidebar button (id 100) opens the Shapes popup,
+ * and the lasso-toolbar button (id 200, #17) opens the Edit Shape panel.
+ * `ButtonEvent` carries no button type, so views are chosen by id alone
+ * (`viewForButtonId`). We install exactly
  * one listener here and fan out to any subscribers (hooks / components)
  * so that:
  *
@@ -21,15 +24,18 @@
  * `lastButtonEventMsg` when a listener registers inside its 1-second
  * window, which is enough for us to capture the initial trigger into
  * module state before components mount.
- *
- * Historically this module also exported BUTTON_ID_SHAPE_OPTIONS=200 for
- * the contextual "Shape Options" lasso-toolbar button. That button + its
- * ShapeOptionsPanel routing were removed per user direction 2026-04-18
- * once ShapePalette grew to own every option it offered.
  */
 import {PluginManager} from 'sn-plugin-lib';
 
 export const BUTTON_ID_TOOLBAR = 100;
+export const BUTTON_ID_LASSO = 200;
+
+export type ActiveView = 'palette' | 'editShape';
+
+/** id 200 → the Edit Shape panel; anything else (100, unknown, none) → the palette. */
+export function viewForButtonId(id: number | undefined): ActiveView {
+  return id === BUTTON_ID_LASSO ? 'editShape' : 'palette';
+}
 
 // Mirror sn-plugin-lib's ButtonEvent shape locally so we don't depend on
 // the library's internal sub-path (which isn't exported in its package

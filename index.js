@@ -2,14 +2,24 @@ import {AppRegistry, Image} from 'react-native';
 import App from './App';
 import {name as appName} from './app.json';
 import {PluginManager} from 'sn-plugin-lib';
-// Side-effect import: installs the single PluginManager.registerButtonListener
-// used by ShapePalette (id=100) and prefixes dispatch logs with
-// [PLUGIN_ROUTER] for logcat searchability.
-import {installPluginRouter} from './src/pluginRouter';
+// installPluginRouter installs the single PluginManager.registerButtonListener
+// that App.tsx routes on (id 100 → Shapes popup, id 200 → Edit Shape) and
+// prefixes dispatch logs with [PLUGIN_ROUTER] for logcat searchability.
+import {
+  BUTTON_ID_LASSO,
+  BUTTON_ID_TOOLBAR,
+  installPluginRouter,
+} from './src/pluginRouter';
 
 const BUTTON_TYPE_TOOLBAR = 1;
-const TOOLBAR_BUTTON_ID = 100;
+const BUTTON_TYPE_LASSO_TOOLBAR = 2;
 const SHOW_TYPE_WITH_UI = 1;
+// editDataTypes filter values (PluginEditButton in sn-plugin-lib):
+//   0 = Handwritten strokes, 1 = Title, 2 = Image, 3 = Text, 4 = Link,
+//   5 = Geometric shapes. The lasso button is gated to [5] so it only
+//   appears when a geometry is lassoed — the same registration the old
+//   id=200 button used, confirmed on Chauvet 3.27.41(2274).
+const EDIT_DATA_TYPE_GEOMETRY = 5;
 
 AppRegistry.registerComponent(appName, () => App);
 
@@ -52,15 +62,27 @@ const requestFilePermissions = async () => {
 };
 requestFilePermissions();
 
-// Single entry point: the main toolbar "Shapes" button opens ShapePalette,
-// which now handles all shape creation + styling in one popup. The
-// previous lasso-toolbar "Shape Options" button (id=200) was removed per
-// user direction 2026-04-18 — every option it offered (pen width, colour,
-// type) is already set in ShapePalette at insert time, so the contextual
-// re-style panel became redundant.
+const ICON_URI = Image.resolveAssetSource(require('./assets/icon.png')).uri;
+
+// Sidebar "Shapes" button: opens the Shapes popup (pick, style, place).
 PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE'], {
-  id: TOOLBAR_BUTTON_ID,
+  id: BUTTON_ID_TOOLBAR,
   name: 'Shapes',
-  icon: Image.resolveAssetSource(require('./assets/icon.png')).uri,
+  icon: ICON_URI,
   showType: SHOW_TYPE_WITH_UI,
+});
+
+// Lasso-toolbar "Shapes" button (#17): opens the Edit Shape panel, whose
+// Resize freely stretches the lassoed shape without keeping its aspect
+// ratio — the one thing the firmware lasso handle cannot do.
+// Payload mirrors the device-verified id=200 registration from April
+// (no showType; the SDK's PluginEditButton does not define one).
+// DEVICE-UNVERIFIED on current Chauvet: visibility and placement (bar vs
+// overflow menu).
+PluginManager.registerButton(BUTTON_TYPE_LASSO_TOOLBAR, ['NOTE'], {
+  id: BUTTON_ID_LASSO,
+  name: 'Shapes',
+  icon: ICON_URI,
+  enable: true,
+  editDataTypes: [EDIT_DATA_TYPE_GEOMETRY],
 });
