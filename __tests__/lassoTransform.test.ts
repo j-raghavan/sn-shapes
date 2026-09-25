@@ -6,6 +6,8 @@
 import {
   geometryNaturalBounds,
   applyRectTransform,
+  boundsMatch,
+  defaultLassoTolerance,
   countsAreUsable,
   isSingleGeometrySelection,
   Rect,
@@ -129,6 +131,53 @@ describe('geometryNaturalBounds', () => {
       ellipseMinorAxisRadius: 100,
     };
     expect(geometryNaturalBounds(g)).toBeNull();
+  });
+});
+
+describe('boundsMatch', () => {
+  const base: Rect = {left: 0, top: 0, right: 100, bottom: 100};
+
+  it('returns true for identical rects', () => {
+    expect(boundsMatch(base, {...base})).toBe(true);
+  });
+
+  it('returns true within default 1px tolerance', () => {
+    expect(boundsMatch(base, {left: 0.5, top: 0, right: 100.5, bottom: 100})).toBe(true);
+  });
+
+  it('returns false beyond tolerance', () => {
+    expect(boundsMatch(base, {left: 0, top: 0, right: 110, bottom: 100})).toBe(false);
+  });
+
+  it('checks every side against a custom tolerance', () => {
+    expect(boundsMatch(base, {left: -9, top: 9, right: 109, bottom: 91}, 10)).toBe(true);
+    expect(boundsMatch(base, {left: 0, top: 0, right: 100, bottom: 111}, 10)).toBe(false);
+    expect(boundsMatch(base, {left: 0, top: -11, right: 100, bottom: 100}, 10)).toBe(false);
+  });
+});
+
+describe('defaultLassoTolerance', () => {
+  it('returns 10 for default (M) pen width', () => {
+    expect(defaultLassoTolerance(400)).toBe(10);
+  });
+
+  it('returns 10 for thin pens (XS, S)', () => {
+    expect(defaultLassoTolerance(200)).toBe(10);
+    expect(defaultLassoTolerance(300)).toBe(10);
+  });
+
+  it('scales up for thick pens to absorb stroke padding', () => {
+    // penWidth=900 → ceil(900/40) = 23. Observed firmware padding on
+    // a thick-stroke parallelogram was up to 17px — 23 gives safety margin.
+    expect(defaultLassoTolerance(900)).toBe(23);
+    expect(defaultLassoTolerance(600)).toBe(15);
+  });
+
+  it('falls back to 10 for invalid penWidth', () => {
+    expect(defaultLassoTolerance(0)).toBe(10);
+    expect(defaultLassoTolerance(-100)).toBe(10);
+    expect(defaultLassoTolerance(NaN)).toBe(10);
+    expect(defaultLassoTolerance(Infinity)).toBe(10);
   });
 });
 

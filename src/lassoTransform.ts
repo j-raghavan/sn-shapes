@@ -4,11 +4,9 @@
  * Consumers:
  *   - placement.ts fits a freshly built shape to a tap point or dragged
  *     box at insert time (#15).
- *   - the Edit Shape panel stretches a lassoed shape onto a new box and
- *     writes it back with `modifyLassoGeometry` (#17). The remap is
- *     absolute from the geometry's *stored* coordinates, so any pending
- *     native lasso resize (which `getLassoGeometries()` does not reflect)
- *     is simply replaced rather than baked in.
+ *   - resizeHandles.ts places the Edit Shape handles on a lassoed shape
+ *     and remaps its *stored* coordinates onto the edited box (#17).
+ *   - the Edit Shape panel checks the lasso holds a single shape (#17).
  *
  * No RN / SDK imports, so everything here is host-testable.
  */
@@ -80,6 +78,38 @@ export function geometryNaturalBounds(g: Geometry): Rect | null {
     default:
       return null;
   }
+}
+
+/**
+ * True when two rects match within the given tolerance (default 1px — e-ink
+ * coordinates are integers).
+ */
+export function boundsMatch(a: Rect, b: Rect, tol = 1): boolean {
+  return (
+    Math.abs(a.left - b.left) <= tol &&
+    Math.abs(a.right - b.right) <= tol &&
+    Math.abs(a.top - b.top) <= tol &&
+    Math.abs(a.bottom - b.bottom) <= tol
+  );
+}
+
+/**
+ * Estimate how much larger than the vertex AABB the firmware's lasso rect
+ * will be, purely due to stroke thickness + miter joins at polygon vertices.
+ *
+ * `geometryNaturalBounds` returns the *vertex* AABB, but
+ * `PluginCommAPI.getLassoRect()` reports the *visual* bounds, which the
+ * firmware inflates by roughly half the pen-stroke extent on each side, plus
+ * miter safety at sharp angles. Empirically on Chauvet firmware 3.27.41
+ * (Supernote Nomad) this was 6-17px for penWidth=900 on a parallelogram.
+ * Anything larger than this is a pending native lasso resize, not padding.
+ *
+ * The coefficient (penWidth / 40, floor 10) was fitted to those logcat
+ * observations and is deliberately generous.
+ */
+export function defaultLassoTolerance(penWidth: number): number {
+  if (!Number.isFinite(penWidth) || penWidth <= 0) {return 10;}
+  return Math.max(10, Math.ceil(penWidth / 40));
 }
 
 function rectWidth(r: Rect): number {
