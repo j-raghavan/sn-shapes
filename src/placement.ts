@@ -36,6 +36,8 @@ export type PlacementTarget =
    *  pen rather than the normalised box. */
   | {kind: 'drag'; rect: Rect; from: Point; to: Point};
 
+export type DragTarget = Extract<PlacementTarget, {kind: 'drag'}>;
+
 export type PlacementOptions = {threshold?: number; minSide?: number};
 
 /** Options for `placeGeometry`. All optional; `{}` is the v1.0.11 behaviour. */
@@ -190,12 +192,8 @@ export function placeGeometry<G extends Geometry>(
   if (target.kind === 'tap') {
     return applyRectTransform(g, natural, translateInsidePage(natural, target.point, page)) as G;
   }
-  const {rect, from, to} = target;
-  if (g.type === 'straightLine') {
-    // A line has direction; fitting it into the normalised box would
-    // always produce the box's diagonal or midline. Follow the pen.
-    return {...g, points: [{...from}, {...to}]};
-  }
+  const {rect} = target;
+  if (g.type === 'straightLine') {return followPen(g, target);}
   if (g.type === 'GEO_circle') {
     const r = Math.min(rect.right - rect.left, rect.bottom - rect.top) / 2;
     return {
@@ -210,4 +208,54 @@ export function placeGeometry<G extends Geometry>(
   }
   const box = opts.keepAspect ? fitRectUniform(natural, rect) : rect;
   return applyRectTransform(g, natural, box) as G;
+}
+
+/**
+ * A line has direction; fitting it into the normalised box would always
+ * produce the box's diagonal or midline. Its points become the pen-down
+ * and pen-up points in gesture order instead. Shared by insert-time
+ * placement and the Edit Shape resize so both treat a line identically.
+ */
+function followPen<G extends Geometry>(g: G, {from, to}: DragTarget): G {
+  return {...g, points: [{...from}, {...to}]};
+}
+
+function isFiniteRect(r: Rect): boolean {
+  return [r.left, r.top, r.right, r.bottom].every(Number.isFinite);
+}
+
+/**
+ * Stretch a lassoed geometry onto a dragged box (#17, Edit Shape).
+ *
+ * Like an insert-time drag without keep-aspect: a line follows the pen
+ * (`followPen`), everything else has its *stored* natural bounds remapped
+ * exactly onto `target.rect`. The remap is absolute, so a pending native
+ * lasso resize needs no baking: `modifyLassoGeometry` with the new
+ * coordinates replaces it. Unlike insert, a circle is not held round: one
+ * stretched unevenly becomes a `GEO_ellipse` (same fields; the relative
+ * tolerance keeps float noise on large radii from flipping the type). A
+ * rotated ellipse is approximated (see `applyRectTransform`). Pen props
+ * and every other non-coordinate field are preserved; the input is never
+ * mutated.
+ *
+ * Returns null when the bounds cannot be determined (unknown type or
+ * malformed geometry), when both source axes are degenerate (every point
+ * coincides — there is nothing to stretch), or when the box is non-finite
+ * or inverted.
+ */
+export function resizeGeometryTo(g: Geometry, target: DragTarget): Geometry | null {
+  const natural = geometryNaturalBounds(g);
+  const {rect} = target;
+  if (!natural || !isFiniteRect(rect)) {return null;}
+  if (rect.right < rect.left || rect.bottom < rect.top) {return null;}
+  if (natural.right - natural.left < EPSILON && natural.bottom - natural.top < EPSILON) {
+    return null;
+  }
+  if (g.type === 'straightLine') {return followPen(g, target);}
+  const out = applyRectTransform(g, natural, rect);
+  if (out.type !== 'GEO_circle') {return out;}
+  const major = out.ellipseMajorAxisRadius as number;
+  const minor = out.ellipseMinorAxisRadius as number;
+  const uneven = Math.abs(major - minor) > EPSILON * Math.max(major, minor);
+  return uneven ? {...out, type: 'GEO_ellipse'} : out;
 }

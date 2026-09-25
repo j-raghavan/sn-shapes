@@ -33,7 +33,6 @@ import {
   Rect,
   geometryNaturalBounds,
   isSingleGeometrySelection,
-  resizeGeometryTo,
 } from './lassoTransform';
 import {
   ApiRes,
@@ -42,7 +41,7 @@ import {
   TOUCH_SCALE,
   resolvePageSize,
 } from './pageSize';
-import {PageSize, PlacementTarget} from './placement';
+import {PageSize, PlacementTarget, resizeGeometryTo} from './placement';
 import PlacementOverlay from './PlacementOverlay';
 
 export const TEST_IDS = {
@@ -175,7 +174,7 @@ export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPan
   const handleResizeCommit = useCallback(async (target: PlacementTarget) => {
     // A tap has no box to stretch into; keep waiting for a drag.
     if (target.kind !== 'drag' || !geometry || busyRef.current) {return;}
-    const next = resizeGeometryTo(geometry, target.rect);
+    const next = resizeGeometryTo(geometry, target);
     if (!next) {
       showError("Can't resize this shape");
       setMode('ready');
