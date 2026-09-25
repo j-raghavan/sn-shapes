@@ -91,19 +91,6 @@ export function geometryNaturalBounds(g: Geometry): Rect | null {
 }
 
 /**
- * True when two rects match within the given tolerance (default 1px — e-ink
- * coordinates are integers).
- */
-export function boundsMatch(a: Rect, b: Rect, tol = 1): boolean {
-  return (
-    Math.abs(a.left - b.left) <= tol &&
-    Math.abs(a.right - b.right) <= tol &&
-    Math.abs(a.top - b.top) <= tol &&
-    Math.abs(a.bottom - b.bottom) <= tol
-  );
-}
-
-/**
  * Estimate how much larger than the vertex AABB the firmware's lasso rect
  * will be, purely due to stroke thickness + miter joins at polygon vertices.
  *
@@ -112,7 +99,7 @@ export function boundsMatch(a: Rect, b: Rect, tol = 1): boolean {
  * firmware inflates by roughly half the pen-stroke extent on each side, plus
  * miter safety at sharp angles. Empirically on Chauvet firmware 3.27.41
  * (Supernote Nomad) this was 6-17px for penWidth=900 on a parallelogram.
- * Anything larger than this is a pending native lasso resize, not padding.
+ * Anything clearly beyond this is a pending native lasso edit, not padding.
  *
  * The coefficient (penWidth / 40, floor 10) was fitted to those logcat
  * observations and is deliberately generous.

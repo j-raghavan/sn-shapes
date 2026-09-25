@@ -4,6 +4,7 @@
  */
 import {
   applyResize,
+  boxHandles,
   dragHandle,
   editsEqual,
   hitTest,
@@ -68,6 +69,28 @@ describe('resizeFrame — the starting box', () => {
     expect(f.start).toEqual(box({left: 97, top: 97, right: 503, bottom: 203}));
   });
 
+  it('padding just over tol on a fresh lasso (sharp vertices) still opens on the stored bounds', () => {
+    // penWidth 400 → tol 10. 9.5 px per side grows the size by 19 ≤ 2·tol,
+    // centre fixed.
+    const lasso = {left: 90.5, top: 90.5, right: 309.5, bottom: 209.5};
+    expect(resizeFrame(square, lasso)).toEqual({stored: N, start: box(N), pending: false});
+    // Miter padding past tol on one side (12 px) only nudges the centre (≤ tol).
+    const lopsided = {left: 88, top: 95, right: 306, bottom: 205};
+    expect(resizeFrame(square, lopsided)!.pending).toBe(false);
+  });
+
+  it('a genuine native resize is pending', () => {
+    expect(resizeFrame(square, {left: 95, top: 95, right: 330, bottom: 205})!.pending).toBe(true);
+    expect(resizeFrame(square, {left: 95, top: 95, right: 305, bottom: 230})!.pending).toBe(true);
+  });
+
+  it('a native move (same size, centre shifted) is pending', () => {
+    const f = resizeFrame(square, {left: 145, top: 95, right: 355, bottom: 205})!;
+    expect(f.pending).toBe(true);
+    expect(f.start).toEqual(box({left: 150, top: 100, right: 350, bottom: 200}));
+    expect(resizeFrame(square, {left: 95, top: 84, right: 305, bottom: 194})!.pending).toBe(true);
+  });
+
   it('the inset is capped at a quarter of each side so a small rect never collapses', () => {
     const f = resizeFrame(square, {left: 0, top: 0, right: 8, bottom: 40})!;
     expect(f.start).toEqual(box({left: 2, top: 2, right: 6, bottom: 38}));
@@ -75,7 +98,7 @@ describe('resizeFrame — the starting box', () => {
 
   it('the padding bound scales with pen width (penWidth 900 → tol 23)', () => {
     const thick = polygon(N, {penWidth: 900});
-    const lasso = {left: 80, top: 80, right: 320, bottom: 220};
+    const lasso = {left: 78, top: 78, right: 322, bottom: 222};
     expect(resizeFrame(thick, lasso)!.pending).toBe(false);
     expect(resizeFrame(square, lasso)!.pending).toBe(true);
   });
@@ -84,6 +107,7 @@ describe('resizeFrame — the starting box', () => {
     const g = polygon(N, {penWidth: NaN});
     expect(resizeFrame(g, {left: 90, top: 90, right: 310, bottom: 210})!.pending).toBe(false);
     expect(resizeFrame(g, {left: 89, top: 90, right: 310, bottom: 210})!.pending).toBe(true);
+    expect(resizeFrame(g, {left: 111, top: 100, right: 311, bottom: 200})!.pending).toBe(true);
   });
 
   it.each([
@@ -100,6 +124,27 @@ describe('resizeFrame — the starting box', () => {
     ['a non-finite point', polygon({left: 0, top: 0, right: NaN, bottom: 10})],
   ])('returns null for %s', (_label, g) => {
     expect(resizeFrame(g, null)).toBeNull();
+  });
+
+  it('a flat polygon (zero height) resizes width only; zero width resizes height only', () => {
+    const flat = polygon({left: 100, top: 200, right: 300, bottom: 200});
+    expect(resizeFrame(flat, null)!.start).toEqual({kind: 'box', rect: {left: 100, top: 200, right: 300, bottom: 200}, resizes: 'x'});
+    const tall = polygon({left: 50, top: 100, right: 50, bottom: 300});
+    expect(resizeFrame(tall, null)!.start).toMatchObject({resizes: 'y'});
+    expect(resizeFrame(square, null)!.start).not.toHaveProperty('resizes');
+  });
+
+  it('a pending flat polygon keeps its flat axis collapsed onto the lasso centre', () => {
+    const flat = polygon({left: 100, top: 200, right: 300, bottom: 200});
+    const f = resizeFrame(flat, {left: 95, top: 190, right: 405, bottom: 214})!;
+    expect(f.pending).toBe(true);
+    expect(f.start).toEqual({kind: 'box', rect: {left: 100, top: 202, right: 400, bottom: 202}, resizes: 'x'});
+  });
+
+  it('a pending upright polygon keeps its zero width collapsed onto the lasso centre', () => {
+    const tall = polygon({left: 50, top: 100, right: 50, bottom: 300});
+    const f = resizeFrame(tall, {left: 40, top: 95, right: 64, bottom: 405})!;
+    expect(f.start).toEqual({kind: 'box', rect: {left: 52, top: 100, right: 52, bottom: 400}, resizes: 'y'});
   });
 
   it('a line opens as a line edit on its first and last points', () => {
@@ -147,8 +192,8 @@ describe('hitTest', () => {
 
   it('on a thin box where two edges are in reach, the nearer wins', () => {
     const thin = box({left: 100, top: 100, right: 400, bottom: 115});
-    expect(hitTest(thin, {x: 250, y: 105})).toBe('n');
-    expect(hitTest(thin, {x: 250, y: 110})).toBe('s');
+    expect(hitTest(thin, {x: 150, y: 105})).toBe('n');
+    expect(hitTest(thin, {x: 150, y: 110})).toBe('s');
   });
 
   it('beyond the side\'s span is not the edge', () => {
@@ -157,6 +202,8 @@ describe('hitTest', () => {
 
   it('inside is move; outside is nothing', () => {
     expect(hitTest(edit, {x: 250, y: 200})).toBe('move');
+    expect(hitTest(edit, {x: 170, y: 160})).toBe('move');
+    expect(hitTest(edit, {x: 250, y: 360})).toBeNull();
     expect(hitTest(edit, {x: 250, y: 59})).toBeNull();
     expect(hitTest(edit, {x: 600, y: 600})).toBeNull();
   });
@@ -165,8 +212,24 @@ describe('hitTest', () => {
     expect(hitTest(edit, {x: NaN, y: 200})).toBeNull();
   });
 
-  it('on a tiny box a corner covers the middle (grow it by a corner first)', () => {
-    expect(hitTest(box({left: 100, top: 100, right: 120, bottom: 120}), {x: 110, y: 110})).toBe('nw');
+  it('on a tiny box the centre still moves it and a corner grows it', () => {
+    const tiny = box({left: 100, top: 100, right: 120, bottom: 120});
+    // t = 10 (floor tol/4), so the centre area is 5 px.
+    expect(hitTest(tiny, {x: 110, y: 110})).toBe('move');
+    expect(hitTest(tiny, {x: 114, y: 106})).toBe('move');
+    expect(hitTest(tiny, {x: 104, y: 104})).toBe('nw');
+    expect(hitTest(tiny, {x: 116, y: 118})).toBe('se');
+  });
+
+  it('where two corners are in reach, the nearer wins', () => {
+    const small = box({left: 100, top: 100, right: 112, bottom: 112});
+    expect(hitTest(small, {x: 103, y: 100})).toBe('nw');
+    expect(hitTest(small, {x: 110, y: 100})).toBe('ne');
+  });
+
+  it('the centre rule wins over a corner that covers it', () => {
+    // t = 10 reaches the centre from every corner of a 16 px box.
+    expect(hitTest(box({left: 100, top: 100, right: 116, bottom: 116}), {x: 108, y: 108})).toBe('move');
   });
 
   it('on a small box the hit distance shrinks to a third of the shorter side', () => {
@@ -179,6 +242,17 @@ describe('hitTest', () => {
     const tiny = box({left: 100, top: 100, right: 112, bottom: 112});
     expect(hitTest(tiny, {x: 100, y: 91})).toBe('nw');
     expect(hitTest(tiny, {x: 100, y: 89})).toBeNull();
+  });
+
+  it('a flat box offers only its end handles, plus move at the centre', () => {
+    const flat: ResizeEdit = {kind: 'box', rect: {left: 100, top: 200, right: 300, bottom: 200}, resizes: 'x'};
+    expect(hitTest(flat, {x: 100, y: 200})).toBe('w');
+    expect(hitTest(flat, {x: 305, y: 204})).toBe('e');
+    expect(hitTest(flat, {x: 200, y: 202})).toBe('move');
+    expect(hitTest(flat, {x: 150, y: 200})).toBeNull();
+    const upright: ResizeEdit = {kind: 'box', rect: {left: 50, top: 100, right: 50, bottom: 300}, resizes: 'y'};
+    expect(hitTest(upright, {x: 50, y: 100})).toBe('n');
+    expect(hitTest(upright, {x: 52, y: 296})).toBe('s');
   });
 
   it('honours a custom tol', () => {
@@ -278,8 +352,29 @@ describe('dragHandle', () => {
     expect(drag('e', 0, Infinity)).toBe(edit);
   });
 
+  it('a flat box ignores handles that would give it height, and keeps its restriction', () => {
+    const flat: ResizeEdit = {kind: 'box', rect: {left: 100, top: 200, right: 300, bottom: 200}, resizes: 'x'};
+    expect(drag('se', 40, 40, flat)).toBe(flat);
+    expect(drag('n', 0, -40, flat)).toBe(flat);
+    expect(drag('e', 40, 40, flat)).toEqual({...flat, rect: {left: 100, top: 200, right: 340, bottom: 200}});
+    expect(drag('move', 10, 10, flat)).toEqual({...flat, rect: {left: 110, top: 210, right: 310, bottom: 210}});
+  });
+
   describe('line', () => {
     const line: ResizeEdit = {kind: 'line', from: {x: 100, y: 100}, to: {x: 300, y: 100}};
+
+    it('an endpoint stops minSide short of the other endpoint', () => {
+      expect(drag('to', -200, 0, line)).toEqual({...line, to: {x: 116, y: 100}});
+      expect(drag('to', -190, 0, line)).toEqual({...line, to: {x: 116, y: 100}});
+      expect(drag('from', 195, 0, line)).toEqual({...line, from: {x: 284, y: 100}});
+      // Dragged past the other endpoint: it stays on the side it moved to.
+      expect(drag('to', -210, 0, line)).toEqual({...line, to: {x: 84, y: 100}});
+    });
+
+    it('an endpoint that starts on the other one is pushed out along +x', () => {
+      const dot: ResizeEdit = {kind: 'line', from: {x: 100, y: 100}, to: {x: 100, y: 100}};
+      expect(drag('to', 0, 0, dot)).toEqual({...dot, to: {x: 116, y: 100}});
+    });
 
     it('drags one endpoint freely', () => {
       expect(drag('to', 50, 20, line)).toEqual({...line, to: {x: 350, y: 120}});
@@ -298,6 +393,16 @@ describe('dragHandle', () => {
     expect(drag('to', 10, 10)).toBe(edit);
     expect(drag('e', 10, 10, line)).toBe(line);
     expect(drag('move', 10, 10, line)).toBe(line);
+  });
+});
+
+describe('boxHandles', () => {
+  const rect = {left: 0, top: 0, right: 10, bottom: 10};
+
+  it('offers all eight side handles, or one axis for a flat shape', () => {
+    expect(boxHandles({kind: 'box', rect})).toEqual(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']);
+    expect(boxHandles({kind: 'box', rect, resizes: 'x'})).toEqual(['e', 'w']);
+    expect(boxHandles({kind: 'box', rect, resizes: 'y'})).toEqual(['n', 's']);
   });
 });
 
@@ -397,6 +502,14 @@ describe('applyResize', () => {
     const flat: Geometry = {type: 'GEO_polygon', ...pen, points: [{x: 0, y: 5}, {x: 100, y: 5}]};
     const out = applyResize(flat, box({left: 0, top: 0, right: 200, bottom: 100}))!;
     expectRectClose(geometryNaturalBounds(out), {left: 0, top: 50, right: 200, bottom: 50});
+  });
+
+  it('a box squashed to zero on an axis the shape has → null; a flat axis may stay flat', () => {
+    expect(applyResize(square, box({left: 100, top: 100, right: 100, bottom: 200}))).toBeNull();
+    expect(applyResize(square, box({left: 100, top: 150, right: 300, bottom: 150}))).toBeNull();
+    const flat = polygon({left: 100, top: 200, right: 300, bottom: 200});
+    const out = applyResize(flat, {kind: 'box', rect: {left: 100, top: 200, right: 500, bottom: 200}, resizes: 'x'})!;
+    expectRectClose(geometryNaturalBounds(out), {left: 100, top: 200, right: 500, bottom: 200});
   });
 
   it('a line edit writes the two endpoints, keeping the pen', () => {
