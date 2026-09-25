@@ -117,15 +117,35 @@ describe('ResizeHandlesOverlay — rendering', () => {
     expect(byId(RESIZE_TEST_IDS.hint).props.children).toBe('Resize failed');
   });
 
-  it('pins the bar to the top, or to the bottom when the shape sits under it', () => {
-    const top = mount();
-    expect(top.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0, height: BAR_HEIGHT_DP});
-    // dp top 50 < BAR_HEIGHT_DP + HANDLE_SIZE_DP.
-    const high = mount({start: {kind: 'box', rect: {left: 200, top: 100, right: 600, bottom: 800}}});
-    expect(high.style(RESIZE_TEST_IDS.bar)).toMatchObject({bottom: 0});
-    expect(high.style(RESIZE_TEST_IDS.bar).top).toBeUndefined();
+  it('puts the bar on the side with more room between the screen edge and the handles', () => {
+    // Page 1872 px tall at scale 2 → 936 dp of screen.
+    const upper = mount();
+    expect(upper.style(RESIZE_TEST_IDS.bar)).toMatchObject({bottom: 0, height: BAR_HEIGHT_DP});
+    expect(upper.style(RESIZE_TEST_IDS.bar).top).toBeUndefined();
+    const lower = mount({start: {kind: 'box', rect: {left: 200, top: 1500, right: 600, bottom: 1800}}});
+    expect(lower.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0});
+    const lowLine = mount({start: {kind: 'line', from: {x: 200, y: 1800}, to: {x: 400, y: 1000}}});
+    expect(lowLine.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0});
     const highLine = mount({start: {kind: 'line', from: {x: 200, y: 900}, to: {x: 400, y: 60}}});
     expect(highLine.style(RESIZE_TEST_IDS.bar)).toMatchObject({bottom: 0});
+  });
+
+  it('a shape as tall as the page keeps the bar on top, clear of the bottom handles', () => {
+    const tall = mount({start: {kind: 'box', rect: {left: 200, top: 0, right: 600, bottom: 1872}}});
+    expect(tall.style(RESIZE_TEST_IDS.bar)).toMatchObject({top: 0});
+    for (const h of ['sw', 's', 'se'] as const) {
+      expect(tall.style(RESIZE_TEST_IDS.handle(h)).top).toBeGreaterThan(BAR_HEIGHT_DP);
+    }
+  });
+
+  it('a flat box draws only the handles it offers', () => {
+    const flat: ResizeEdit = {kind: 'box', rect: {left: 200, top: 400, right: 600, bottom: 400}, resizes: 'x'};
+    const {has} = mount({start: flat});
+    expect(has(RESIZE_TEST_IDS.handle('e'))).toBe(true);
+    expect(has(RESIZE_TEST_IDS.handle('w'))).toBe(true);
+    for (const h of ['nw', 'n', 'ne', 'se', 's', 'sw'] as const) {
+      expect(has(RESIZE_TEST_IDS.handle(h))).toBe(false);
+    }
   });
 });
 

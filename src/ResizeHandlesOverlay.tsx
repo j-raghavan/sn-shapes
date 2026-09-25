@@ -19,7 +19,7 @@ import {GestureResponderEvent, Pressable, StyleSheet, Text, View} from 'react-na
 import {Point, Rect} from './lassoTransform';
 import {PageSize, pageToTouch, touchToPage} from './placement';
 import {boxStyle, RUBBER_BAND_THROTTLE_MS, touchPoint} from './PlacementOverlay';
-import {dragHandle, Handle, hitTest, ResizeEdit} from './resizeHandles';
+import {BoxHandle, boxHandles, dragHandle, Handle, hitTest, ResizeEdit} from './resizeHandles';
 
 export const RESIZE_TEST_IDS = {
   overlay: 'resize-overlay',
@@ -65,7 +65,7 @@ function dpRect(r: Rect, scale: number): Rect {
   return {left: a.x, top: a.y, right: b.x, bottom: b.y};
 }
 
-/** The handle points of an edit, in dp. */
+/** The handle points an edit offers (`boxHandles`), in dp. */
 function handlePoints(edit: ResizeEdit, scale: number): Array<[Handle, Point]> {
   if (edit.kind === 'line') {
     return [['from', pageToTouch(edit.from, scale)], ['to', pageToTouch(edit.to, scale)]];
@@ -73,18 +73,27 @@ function handlePoints(edit: ResizeEdit, scale: number): Array<[Handle, Point]> {
   const {left, top, right, bottom} = edit.rect;
   const midX = (left + right) / 2;
   const midY = (top + bottom) / 2;
-  const pts: Array<[Handle, Point]> = [
+  const pts: Array<[BoxHandle, Point]> = [
     ['nw', {x: left, y: top}], ['n', {x: midX, y: top}], ['ne', {x: right, y: top}],
     ['e', {x: right, y: midY}], ['se', {x: right, y: bottom}], ['s', {x: midX, y: bottom}],
     ['sw', {x: left, y: bottom}], ['w', {x: left, y: midY}],
   ];
-  return pts.map(([h, p]) => [h, pageToTouch(p, scale)]);
+  const offered = boxHandles(edit);
+  return pts.filter(([h]) => offered.includes(h)).map(([h, p]) => [h, pageToTouch(p, scale)]);
 }
 
-/** Top of the edit's drawn bounds, in dp. */
-function topDp(edit: ResizeEdit, scale: number): number {
-  const y = edit.kind === 'line' ? Math.min(edit.from.y, edit.to.y) : edit.rect.top;
-  return pageToTouch({x: 0, y}, scale).y;
+/**
+ * True when the bar belongs at the bottom: the side with more clearance
+ * between the screen edge and the drawn handles wins, top on a tie. A
+ * shape as tall as the page leaves no clearance either way; the bar then
+ * sits on top, so the bottom handles stay reachable.
+ */
+function barBelongsAtBottom(points: Array<[Handle, Point]>, page: PageSize, scale: number): boolean {
+  const ys = points.map(([, p]) => p.y);
+  const half = HANDLE_SIZE_DP / 2;
+  const topClear = Math.min(...ys) - half;
+  const bottomClear = pageToTouch({x: 0, y: page.height}, scale).y - (Math.max(...ys) + half);
+  return bottomClear > topClear;
 }
 
 /** A 2 px segment from `a` to `b` (dp): a View rotated about its midpoint. */
@@ -168,10 +177,10 @@ export default function ResizeHandlesOverlay({
     setEdit(snap.edit);
   }, []);
 
-  // The bar moves to the bottom when the shape sits under it, so it never
-  // covers a handle. Evaluated per render; the responder is already
-  // granted, so a flip mid-drag cannot steal the gesture.
-  const barAtBottom = topDp(edit, scale) < BAR_HEIGHT_DP + HANDLE_SIZE_DP;
+  const points = handlePoints(edit, scale);
+  // Evaluated per render; the responder is already granted, so a flip
+  // mid-drag cannot steal the gesture.
+  const barAtBottom = barBelongsAtBottom(points, page, scale);
 
   return (
     <View
@@ -197,7 +206,7 @@ export default function ResizeHandlesOverlay({
           style={[styles.segment, segmentStyle(pageToTouch(edit.from, scale), pageToTouch(edit.to, scale))]}
         />
       )}
-      {handlePoints(edit, scale).map(([h, p]) => (
+      {points.map(([h, p]) => (
         <View
           key={h}
           testID={RESIZE_TEST_IDS.handle(h)}
