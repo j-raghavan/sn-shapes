@@ -40,6 +40,13 @@ import {
   FavoritesStorage,
   createMemoryFavoritesStorage,
 } from '../src/favoritesStorage';
+import {
+  PalettePreferences,
+  PreferencesStorage,
+  createMemoryPreferencesStorage,
+  getDefaultPreferencesStorage,
+  __resetDefaultPreferencesStorageForTest,
+} from '../src/preferencesStorage';
 import {TEST_IDS as PREVIEW_TEST_IDS} from '../src/StrokePreview';
 import {DRAG_THRESHOLD_PX} from '../src/placement';
 import {RUBBER_BAND_THROTTLE_MS} from '../src/PlacementOverlay';
@@ -82,6 +89,9 @@ beforeEach(() => {
   (PluginCommAPI.getCurrentPageNum as jest.Mock).mockClear();
   (PluginFileAPI.getPageSize as jest.Mock).mockClear();
   (PluginManager.closePluginView as jest.Mock).mockClear();
+  // The default preferences backend is memoised per JS engine; reset it
+  // so a Keep-aspect toggle in one test never leaks into the next.
+  __resetDefaultPreferencesStorageForTest();
   consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -99,11 +109,11 @@ afterEach(() => {
 // can land in "user already has favorites X, Y" without driving the
 // heart toggle through the UI first. When omitted, every mount uses a
 // fresh memory backend so favorites state never leaks between tests.
-async function mountPalette(storage?: FavoritesStorage) {
+async function mountPalette(storage?: FavoritesStorage, preferences?: PreferencesStorage) {
   const injectedStorage = storage ?? createMemoryFavoritesStorage();
   let tree: ReactTestRenderer;
   act(() => {
-    tree = create(<ShapePalette storage={injectedStorage} />);
+    tree = create(<ShapePalette storage={injectedStorage} preferences={preferences} />);
   });
   await act(async () => {
     await flushPromises();
@@ -1328,6 +1338,186 @@ describe('ShapePalette (merged popup)', () => {
         bounds = boundsOf(insertMock!.mock.calls[0][0]);
       });
       expect(bounds).toEqual({left: 300, right: 900, top: 300, bottom: 1500});
+    });
+  });
+  describe('Keep aspect ratio (#17)', () => {
+    function boundsOf(geo: {points: {x: number; y: number}[]}) {
+      const xs = geo.points.map(p => p.x);
+      const ys = geo.points.map(p => p.y);
+      return {
+        left: Math.min(...xs), right: Math.max(...xs),
+        top: Math.min(...ys), bottom: Math.max(...ys),
+      };
+    }
+    const checkbox = (tree: ReactTestRenderer) => findByTestID(tree, TEST_IDS.keepAspect);
+    const isChecked = (tree: ReactTestRenderer) => checkbox(tree).props.accessibilityState.checked;
+    const glyph = (tree: ReactTestRenderer) =>
+      checkbox(tree).findAllByType(Text)[0].props.children;
+    async function toggle(tree: ReactTestRenderer) {
+      await act(async () => {
+        checkbox(tree).props.onPress();
+        await flushPromises();
+      });
+    }
+    // Wide drag (dp): 600×200 dp → the 200×200 px default rectangle.
+    const DOWN: Pt = {x: 100, y: 100};
+    const UP: Pt = {x: 700, y: 300};
+
+    it('AC3.1: renders an unchecked checkbox by default', async () => {
+      const tree = await mountPalette();
+      expect(checkbox(tree).props.accessibilityRole).toBe('checkbox');
+      expect(isChecked(tree)).toBe(false);
+      expect(glyph(tree)).toBe('☐');
+    });
+
+    it('minimal input: no preferences prop → unchecked, and a drag fills the box as in v1.0.11', async () => {
+      const tree = await mountPalette();
+      await pressInsert(tree, DOWN, UP);
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(boundsOf(geo)).toEqual({left: px(100), right: px(700), top: px(100), bottom: px(300)});
+    });
+
+    it('AC3.2: checked + drag inserts a proportional shape centred in the box', async () => {
+      const tree = await mountPalette();
+      await toggle(tree);
+      expect(isChecked(tree)).toBe(true);
+      expect(glyph(tree)).toBe('☑');
+      await pressInsert(tree, DOWN, UP);
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      const side = px(200);
+      const cx = px(400);
+      expect(boundsOf(geo)).toEqual({
+        left: cx - side / 2, right: cx + side / 2, top: px(100), bottom: px(300),
+      });
+    });
+
+    it('AC3.2: toggling twice restores the fill behaviour', async () => {
+      const tree = await mountPalette();
+      await toggle(tree);
+      await toggle(tree);
+      expect(isChecked(tree)).toBe(false);
+      await pressInsert(tree, DOWN, UP);
+      const geo = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls[0][0];
+      expect(boundsOf(geo)).toEqual({left: px(100), right: px(700), top: px(100), bottom: px(300)});
+    });
+
+    it('a tap inserts the same geometry whether checked or not', async () => {
+      const off = await mountPalette();
+      await pressInsert(off, {x: 400, y: 600});
+      const on = await mountPalette();
+      await toggle(on);
+      await pressInsert(on, {x: 400, y: 600});
+      const calls = (PluginCommAPI.insertGeometry as jest.Mock).mock.calls;
+      expect(calls[1][0]).toEqual(calls[0][0]);
+    });
+
+    it('two taps before a re-render flip twice and save each value', async () => {
+      const prefs = createMemoryPreferencesStorage();
+      const save = jest.spyOn(prefs, 'save');
+      const tree = await mountPalette(undefined, prefs);
+      const onPress = checkbox(tree).props.onPress;
+      await act(async () => {
+        onPress();
+        onPress();
+        await flushPromises();
+      });
+      expect(save.mock.calls).toEqual([[{keepAspect: true}], [{keepAspect: false}]]);
+      expect(isChecked(tree)).toBe(false);
+    });
+
+    it('a toggle after hydration flips the loaded value', async () => {
+      const prefs = createMemoryPreferencesStorage({keepAspect: true});
+      const tree = await mountPalette(undefined, prefs);
+      await toggle(tree);
+      expect(isChecked(tree)).toBe(false);
+      expect(await prefs.load()).toEqual({keepAspect: false});
+    });
+
+    it('AC3.3: a stored true is shown checked after hydration', async () => {
+      const tree = await mountPalette(undefined, createMemoryPreferencesStorage({keepAspect: true}));
+      expect(isChecked(tree)).toBe(true);
+    });
+
+    it('AC3.3 mid-operation: a toggle before hydration wins over the loaded value', async () => {
+      let resolveLoad: (p: PalettePreferences) => void = () => {};
+      const prefs: PreferencesStorage = {
+        load: () => new Promise(r => { resolveLoad = r; }),
+        save: jest.fn(async () => {}),
+      };
+      let tree: ReactTestRenderer;
+      act(() => {
+        tree = create(<ShapePalette storage={createMemoryFavoritesStorage()} preferences={prefs} />);
+      });
+      await toggle(tree!);
+      expect(isChecked(tree!)).toBe(true);
+      await act(async () => {
+        resolveLoad({keepAspect: false});
+        await flushPromises();
+      });
+      expect(isChecked(tree!)).toBe(true);
+      expect(prefs.save).toHaveBeenCalledTimes(1);
+      expect(prefs.save).toHaveBeenCalledWith({keepAspect: true});
+    });
+
+    it('AC3.4: toggling persists, and hydration alone never writes', async () => {
+      const prefs = createMemoryPreferencesStorage();
+      const save = jest.spyOn(prefs, 'save');
+      const tree = await mountPalette(undefined, prefs);
+      expect(save).not.toHaveBeenCalled();
+      await toggle(tree);
+      expect(save).toHaveBeenCalledWith({keepAspect: true});
+      expect(await prefs.load()).toEqual({keepAspect: true});
+    });
+
+    it('persists across remounts through the default (memoised) storage', async () => {
+      const first = await mountPalette();
+      await toggle(first);
+      act(() => first.unmount());
+      const second = await mountPalette();
+      expect(isChecked(second)).toBe(true);
+      expect(await getDefaultPreferencesStorage().load()).toEqual({keepAspect: true});
+    });
+
+    it('AC3.5: a toggle is ignored while an insert is in flight', async () => {
+      let resolveInsert: (v: unknown) => void = () => {};
+      (PluginCommAPI.insertGeometry as jest.Mock).mockImplementationOnce(
+        () => new Promise(r => { resolveInsert = r; }),
+      );
+      const tree = await mountPalette();
+      let pending: Promise<unknown> | undefined;
+      act(() => { pending = tapOverlay(tree); });
+      await toggle(tree);
+      expect(isChecked(tree)).toBe(false);
+      await act(async () => {
+        resolveInsert({success: true});
+        await pending;
+        await flushPromises();
+      });
+    });
+
+    it('AC3.5: pressing the checkbox never inserts', async () => {
+      const tree = await mountPalette();
+      await toggle(tree);
+      expect(PluginCommAPI.insertGeometry).not.toHaveBeenCalled();
+      expect(PluginManager.closePluginView).not.toHaveBeenCalled();
+    });
+
+    it('an unmount before hydration resolves applies nothing', async () => {
+      let resolveLoad: (p: PalettePreferences) => void = () => {};
+      const prefs: PreferencesStorage = {
+        load: () => new Promise(r => { resolveLoad = r; }),
+        save: jest.fn(async () => {}),
+      };
+      let tree: ReactTestRenderer;
+      act(() => {
+        tree = create(<ShapePalette storage={createMemoryFavoritesStorage()} preferences={prefs} />);
+      });
+      act(() => tree!.unmount());
+      await act(async () => {
+        resolveLoad({keepAspect: true});
+        await flushPromises();
+      });
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
 });

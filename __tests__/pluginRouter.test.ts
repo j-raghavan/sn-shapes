@@ -29,7 +29,9 @@ import {
   subscribeToButtonEvents,
   getLastButtonEvent,
   __testing__,
+  BUTTON_ID_LASSO,
   BUTTON_ID_TOOLBAR,
+  viewForButtonId,
 } from '../src/pluginRouter';
 
 beforeEach(() => {
@@ -38,11 +40,16 @@ beforeEach(() => {
 });
 
 describe('pluginRouter', () => {
-  it('exports the toolbar button id constant', () => {
-    // Single registered button: id=100 "Shapes". The former id=200
-    // "Shape Options" export was removed when the contextual panel was
-    // folded into ShapePalette itself.
+  it('exports the sidebar and lasso-toolbar button ids', () => {
     expect(BUTTON_ID_TOOLBAR).toBe(100);
+    expect(BUTTON_ID_LASSO).toBe(200);
+  });
+
+  it('AC8.1: routes the lasso button to Edit Shape and everything else to the palette', () => {
+    expect(viewForButtonId(200)).toBe('editShape');
+    expect(viewForButtonId(100)).toBe('palette');
+    expect(viewForButtonId(999)).toBe('palette');
+    expect(viewForButtonId(undefined)).toBe('palette');
   });
 
   it('installs a single listener on first call', () => {
@@ -61,7 +68,7 @@ describe('pluginRouter', () => {
   it('records the last button event for synchronous reads', () => {
     installPluginRouter();
     expect(getLastButtonEvent()).toBeNull();
-    const event = {id: 200, pressEvent: 3, name: 'Shape Options', icon: '', color: 0, bgColor: 0};
+    const event = {id: 200, pressEvent: 3, name: 'Shapes', icon: '', color: 0, bgColor: 0};
     registeredListeners[0].onButtonPress(event);
     expect(getLastButtonEvent()).toEqual(event);
   });

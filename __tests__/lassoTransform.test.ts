@@ -1,13 +1,14 @@
 /**
- * Unit tests for src/lassoTransform. Pure functions, no SDK/RN — each test
- * pins the invariants we rely on for v1.0.2's "preserve lasso resize" fix.
+ * Unit tests for src/lassoTransform. Pure functions, no SDK/RN — bounds,
+ * rect remapping (insert-time placement, #15) and the free-resize helpers
+ * behind the Edit Shape panel (#17).
  */
 import {
   geometryNaturalBounds,
   applyRectTransform,
-  boundsMatch,
-  bakeLassoResize,
   defaultLassoTolerance,
+  countsAreUsable,
+  isSingleGeometrySelection,
   Rect,
   Geometry,
 } from '../src/lassoTransform';
@@ -132,19 +133,28 @@ describe('geometryNaturalBounds', () => {
   });
 });
 
-describe('boundsMatch', () => {
-  const base: Rect = {left: 0, top: 0, right: 100, bottom: 100};
-
-  it('returns true for identical rects', () => {
-    expect(boundsMatch(base, {...base})).toBe(true);
+describe('defaultLassoTolerance', () => {
+  it('returns 10 for default (M) pen width', () => {
+    expect(defaultLassoTolerance(400)).toBe(10);
   });
 
-  it('returns true within default 1px tolerance', () => {
-    expect(boundsMatch(base, {left: 0.5, top: 0, right: 100.5, bottom: 100})).toBe(true);
+  it('returns 10 for thin pens (XS, S)', () => {
+    expect(defaultLassoTolerance(200)).toBe(10);
+    expect(defaultLassoTolerance(300)).toBe(10);
   });
 
-  it('returns false beyond tolerance', () => {
-    expect(boundsMatch(base, {left: 0, top: 0, right: 110, bottom: 100})).toBe(false);
+  it('scales up for thick pens to absorb stroke padding', () => {
+    // penWidth=900 → ceil(900/40) = 23. Observed firmware padding on
+    // a thick-stroke parallelogram was up to 17px — 23 gives safety margin.
+    expect(defaultLassoTolerance(900)).toBe(23);
+    expect(defaultLassoTolerance(600)).toBe(15);
+  });
+
+  it('falls back to 10 for invalid penWidth', () => {
+    expect(defaultLassoTolerance(0)).toBe(10);
+    expect(defaultLassoTolerance(-100)).toBe(10);
+    expect(defaultLassoTolerance(NaN)).toBe(10);
+    expect(defaultLassoTolerance(Infinity)).toBe(10);
   });
 });
 
@@ -332,130 +342,66 @@ describe('applyRectTransform', () => {
   });
 });
 
-describe('defaultLassoTolerance', () => {
-  it('returns 10 for default (M) pen width', () => {
-    expect(defaultLassoTolerance(400)).toBe(10);
+describe('isSingleGeometrySelection (#17, AC5.1)', () => {
+  it('degrades to the geometry list when counts are unavailable', () => {
+    expect(isSingleGeometrySelection(null, 1)).toBe(true);
+    expect(isSingleGeometrySelection(null, 0)).toBe(false);
+    expect(isSingleGeometrySelection(null, 2)).toBe(false);
   });
 
-  it('returns 10 for thin pens (XS, S)', () => {
-    expect(defaultLassoTolerance(200)).toBe(10);
-    expect(defaultLassoTolerance(300)).toBe(10);
+  it('accepts exactly one geometry and nothing else', () => {
+    expect(isSingleGeometrySelection({geometryNum: 1}, 1)).toBe(true);
+    expect(isSingleGeometrySelection({geometryNum: 1, trailNum: 0, titleNum: 0}, 1)).toBe(true);
   });
 
-  it('scales up for thick pens to absorb stroke padding', () => {
-    // penWidth=900 → ceil(900/40) = 23. Observed firmware padding on
-    // a thick-stroke parallelogram was up to 17px — 23 gives safety margin.
-    expect(defaultLassoTolerance(900)).toBe(23);
-    expect(defaultLassoTolerance(600)).toBe(15);
+  it('rejects when counts report more than one geometry', () => {
+    expect(isSingleGeometrySelection({geometryNum: 2}, 1)).toBe(false);
+    expect(isSingleGeometrySelection({geometryNum: 0}, 1)).toBe(false);
   });
 
-  it('falls back to 10 for invalid penWidth', () => {
-    expect(defaultLassoTolerance(0)).toBe(10);
-    expect(defaultLassoTolerance(-100)).toBe(10);
-    expect(defaultLassoTolerance(NaN)).toBe(10);
-    expect(defaultLassoTolerance(Infinity)).toBe(10);
+  it.each([
+    ['empty counts', {}],
+    ['a non-numeric geometryNum', {geometryNum: '1'}],
+    ['only geometry subtype counts', {polygonNum: 1}],
+    ['zero non-geometry counts', {trailNum: 0}],
+  ])('degrades to the geometry list for %s', (_label, counts) => {
+    expect(isSingleGeometrySelection(counts, 1)).toBe(true);
+    expect(isSingleGeometrySelection(counts, 2)).toBe(false);
+  });
+
+  it('rejects when the geometry list disagrees with the counts', () => {
+    expect(isSingleGeometrySelection({geometryNum: 1}, 2)).toBe(false);
+  });
+
+  it.each([
+    'trailNum', 'titleNum', 'bitmapNum', 'normalTextBoxNum', 'digestTextBoxNum',
+    'digestTextBoxEditableNum', 'trailLinkNum', 'textLinkNum', 'todoLinkNum',
+  ])('rejects a mixed selection with %s > 0', field => {
+    expect(isSingleGeometrySelection({geometryNum: 1, [field]: 1}, 1)).toBe(false);
+  });
+
+  it('refuses a positive non-geometry count even when geometryNum is missing', () => {
+    expect(isSingleGeometrySelection({trailNum: 4}, 1)).toBe(false);
+    expect(isSingleGeometrySelection({geometryNum: '1', titleNum: 1}, 1)).toBe(false);
+  });
+
+  it('ignores geometry subtype counts', () => {
+    expect(
+      isSingleGeometrySelection({geometryNum: 1, circleNum: 1, ellipseNum: 1, straightLineNum: 1}, 1),
+    ).toBe(true);
+  });
+
+  it('treats non-number fields as absent', () => {
+    expect(isSingleGeometrySelection({geometryNum: 1, trailNum: 'x'}, 1)).toBe(true);
   });
 });
 
-describe('bakeLassoResize', () => {
-  const circle: Geometry = {
-    type: 'GEO_circle',
-    penColor: 0, penType: 10, penWidth: 400,
-    ellipseCenterPoint: {x: 100, y: 100},
-    ellipseMajorAxisRadius: 50,
-    ellipseMinorAxisRadius: 50,
-    ellipseAngle: 0,
-  };
-
-  it('returns input when lassoRect is null', () => {
-    expect(bakeLassoResize(circle, null)).toBe(circle);
-  });
-
-  it('returns input unchanged when the geometry has no natural bounds', () => {
-    const unknownType: Geometry = {type: 'GEO_mystery', penColor: 0, penType: 10, penWidth: 400};
-    const someRect: Rect = {left: 0, top: 0, right: 100, bottom: 100};
-    expect(bakeLassoResize(unknownType, someRect)).toBe(unknownType);
-  });
-
-  it('returns input when lassoRect matches natural bounds within tolerance', () => {
-    const matchingRect: Rect = {left: 50, top: 50, right: 150, bottom: 150};
-    expect(bakeLassoResize(circle, matchingRect)).toBe(circle);
-  });
-
-  it('returns input unchanged when rects match within sub-pixel tolerance', () => {
-    const nearlyMatching: Rect = {left: 50.5, top: 50, right: 150, bottom: 150};
-    expect(bakeLassoResize(circle, nearlyMatching, 1)).toBe(circle);
-  });
-
-  it('returns transformed geometry when lassoRect differs from natural bounds', () => {
-    // Lasso was dragged to 2x size.
-    const resized: Rect = {left: 0, top: 0, right: 200, bottom: 200};
-    const out = bakeLassoResize(circle, resized);
-    expect(out).not.toBe(circle);
-    expect(out.ellipseMajorAxisRadius).toBe(100);
-    expect(out.ellipseMinorAxisRadius).toBe(100);
-    expect(out.ellipseCenterPoint).toEqual({x: 100, y: 100});
-  });
-
-  it('absorbs firmware stroke-padding (logcat-phase1.txt fixture)', () => {
-    // Real fixture from logcat-phase1.txt: a parallelogram inserted at
-    // natural bounds 552-852 × 861-1011 with penWidth=900, and the firmware
-    // immediately reports a lasso rect of 546-860 × 848-1028 — that 6-17px
-    // delta is stroke + miter padding, NOT a user resize. bakeLassoResize
-    // must treat this as a no-op; otherwise every modify grows the shape.
-    const parallelogram: Geometry = {
-      type: 'GEO_polygon',
-      penColor: 0, penType: 10, penWidth: 900,
-      points: [
-        {x: 652, y: 861},
-        {x: 852, y: 861},
-        {x: 752, y: 1011},
-        {x: 552, y: 1011},
-        {x: 652, y: 861},
-      ],
-    };
-    const firmwarePaddedLasso: Rect = {left: 546, top: 848, right: 860, bottom: 1028};
-    expect(bakeLassoResize(parallelogram, firmwarePaddedLasso)).toBe(parallelogram);
-  });
-
-  it('still fires for a genuine user resize on a thick-pen shape', () => {
-    // Same parallelogram as above, but user dragged the lasso to ~2x size.
-    // The delta (~300px) is well beyond any plausible stroke padding so the
-    // bake must fire and scale vertices to the new rect.
-    const parallelogram: Geometry = {
-      type: 'GEO_polygon',
-      penColor: 0, penType: 10, penWidth: 900,
-      points: [
-        {x: 652, y: 861},
-        {x: 852, y: 861},
-        {x: 752, y: 1011},
-        {x: 552, y: 1011},
-        {x: 652, y: 861},
-      ],
-    };
-    const resizedLasso: Rect = {left: 400, top: 700, right: 1000, bottom: 1300};
-    const out = bakeLassoResize(parallelogram, resizedLasso);
-    expect(out).not.toBe(parallelogram);
-    // New vertex AABB should match the resized lasso.
-    const newBounds = geometryNaturalBounds(out)!;
-    expectRectClose(newBounds, resizedLasso, 1);
-  });
-
-  it('explicit tol parameter overrides the penWidth-based default', () => {
-    // With penWidth=900 the auto-tol is 23, which would normally swallow
-    // this 15px delta. Passing tol=1 forces the strict comparison, so the
-    // bake fires.
-    const parallelogram: Geometry = {
-      type: 'GEO_polygon',
-      penColor: 0, penType: 10, penWidth: 900,
-      points: [
-        {x: 0, y: 0}, {x: 100, y: 0}, {x: 100, y: 100}, {x: 0, y: 100},
-      ],
-    };
-    const slightlyOff: Rect = {left: -7, top: -8, right: 107, bottom: 108};
-    // With auto-tol (23): would no-op.
-    expect(bakeLassoResize(parallelogram, slightlyOff)).toBe(parallelogram);
-    // With explicit 1px tol: bakes.
-    expect(bakeLassoResize(parallelogram, slightlyOff, 1)).not.toBe(parallelogram);
+describe('countsAreUsable (#17)', () => {
+  it('needs a numeric geometryNum', () => {
+    expect(countsAreUsable({geometryNum: 1})).toBe(true);
+    expect(countsAreUsable({geometryNum: 0})).toBe(true);
+    expect(countsAreUsable(null)).toBe(false);
+    expect(countsAreUsable({})).toBe(false);
+    expect(countsAreUsable({geometryNum: '1'})).toBe(false);
   });
 });

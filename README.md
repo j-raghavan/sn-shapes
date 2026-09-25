@@ -19,6 +19,11 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 <video src="https://github.com/user-attachments/assets/298211f3-0039-4edd-aee5-6f1259272cc2" controls muted playsinline width="720"></video>
 -->
 
+## What's New in v1.0.12
+
+  1. **Keep aspect ratio.** A new checkbox in the Shapes popup. Leave it unticked and a dragged shape stretches to fill the box you draw (as before); tick it and the shape keeps its proportions, scaled to fit inside the box and centred. Your choice is remembered while the plugin stays loaded.
+  2. **Free resize from the lasso.** Lasso a shape and tap **Shapes** in the lasso toolbar to get eight handles on it: corners stretch width and height freely, edges stretch one direction only, and dragging inside the box moves it. Lines get a handle on each end. Nothing changes until you tap **Done** in the small toolbar next to the shape; **Cancel** leaves it as it was. Unlike the native lasso handle, the aspect ratio is not locked and the stroke keeps the width you picked. See [Resizing a placed shape](#resizing-a-placed-shape).
+
 ## What's New in v1.0.5
 
   1. New "♡ Favorites" category, listed first in the carousel. Carousel cycles favorites → basic → arrows → flowchart → decorative → others; landing tab stays basic (so a fresh-install user doesn't open onto an empty grid), with favorites one ◀
@@ -38,8 +43,20 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 2. Tap the **Plugins** icon in the left toolbar (the puzzle piece).
 3. Tap **Shapes** to open the popup.
 4. Tap a shape in the grid to select it, then tune **Stroke Width** (XS / S / M / L / XL) and **Stroke Color** using the pickers below. The live preview updates as you go.
-5. Put the pen down **anywhere outside the popup** to commit. A **tap** inserts the shape at its default size centred under the pen tip; a **drag** draws a box (an outline follows the pen) and the shape is fitted into it at the stroke width you picked (resizing later with the lasso handle scales the stroke, so draw the box at the size you want). Circles keep their proportions and use the shorter side of the box; a dragged Line runs from pen-down to pen-up. Either way the shape is auto-lassoed so you can still reposition it straight away.
+5. Put the pen down **anywhere outside the popup** to commit. A **tap** inserts the shape at its default size centred under the pen tip; a **drag** draws a box (an outline follows the pen) and the shape is fitted into it at the stroke width you picked. By default the shape stretches to fill the box; tick **Keep aspect ratio** to keep its proportions instead (it is scaled to fit inside the box and centred). Circles always keep their proportions and use the shorter side of the box; a dragged Line runs from pen-down to pen-up. Either way the shape is auto-lassoed so you can still reposition it straight away.
 6. To dismiss without inserting, tap the ✕ in the popup header.
+
+### Resizing a placed shape
+
+The Supernote's own lasso handle keeps a shape's proportions and scales its stroke width with it. To stretch a shape to any width and height without that:
+
+1. Lasso the shape, then tap **Shapes** in the lasso toolbar. The lasso box is replaced by the shape's box with eight handles, and a small **Cancel** | **Done** toolbar just below the shape (above it near the bottom of the page). The toolbar hides while you drag and comes back where the shape lands. The box sits on the shape's outline, not on the outer edge of a thick stroke.
+2. Drag a handle. The **corners** stretch width and height freely; the **edges** stretch one direction only (left/right for width, top/bottom for height). Drag **inside the box** to move it. A **line** shows its two ends instead; drag either end anywhere. For a very small shape, touch its centre to move it, or pull a corner to make it bigger.
+3. Adjust as often as you like; only the box moves while you drag. Tap **Done** to redraw the shape in the new box, or **Cancel** to leave it as it was. A circle becomes an ellipse if the box isn't square.
+
+The stroke is rewritten at the shape's stored pen width, which is the width you picked when inserting it. If you had already resized the shape with the lasso handle, the stroke the firmware scaled may snap back to that stored width.
+
+This works on one shape at a time; a selection with several shapes or with handwriting shows "Select a single shape to resize."
 
 ## Building
 
@@ -74,11 +91,14 @@ npm run lint
 src/
   shapes.ts          Shape definitions and geometry helpers
   ShapePalette.tsx   Unified Shapes popup (grid, preview, pickers)
+  ShapeOptionsPanel.tsx  Edit Shape (lasso toolbar: resize handles)
+  ResizeHandlesOverlay.tsx  Resize handles UI (box, handles, Cancel / Done)
+  resizeHandles.ts   Resize handle geometry (hit-testing, drags, toolbar placement)
   StrokePreview.tsx  Live preview panel
 assets/
   icon.png           Toolbar icon
   shapes/            Shape thumbnail images
-index.js             Plugin entry point (toolbar button registration)
+index.js             Plugin entry point (sidebar + lasso-toolbar button registration)
 App.tsx              React Native root component
 ```
 

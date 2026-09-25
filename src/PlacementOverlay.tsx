@@ -46,8 +46,14 @@ export type PlacementOverlayProps = {
 // Hoisted so the responder prop is referentially stable across renders.
 const claimResponder = () => true;
 
-function touchPoint(e: GestureResponderEvent): Point {
+/** The pen position of a responder event, in root-view dp. */
+export function touchPoint(e: GestureResponderEvent): Point {
   return {x: e.nativeEvent.pageX, y: e.nativeEvent.pageY};
+}
+
+/** Absolute-position style for a dp rect. */
+export function boxStyle(r: Rect) {
+  return {left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top};
 }
 
 export default function PlacementOverlay({
@@ -128,15 +134,7 @@ export default function PlacementOverlay({
         <View
           testID={OVERLAY_TEST_IDS.rubberBand}
           pointerEvents="none"
-          style={[
-            styles.rubberBand,
-            {
-              left: rubberBand.left,
-              top: rubberBand.top,
-              width: rubberBand.right - rubberBand.left,
-              height: rubberBand.bottom - rubberBand.top,
-            },
-          ]}
+          style={[styles.rubberBand, boxStyle(rubberBand)]}
         />
       )}
       {children}

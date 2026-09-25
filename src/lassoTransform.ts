@@ -1,22 +1,14 @@
 /**
- * Lasso-transform utilities.
+ * Lasso-transform utilities: pure geometry bounds and rect remapping.
  *
- * Why this exists: when the user resizes a lassoed shape with the native
- * lasso handle, the firmware keeps the resize as a pending transform on the
- * *lasso selection*, not as a mutation of the geometry's own coordinates.
- * `PluginCommAPI.getLassoGeometries()` returns the geometry's *stored*
- * coordinates (pre-resize); `PluginCommAPI.getLassoRect()` returns the
- * current *visual* bounds (post-resize).
+ * Consumers:
+ *   - placement.ts fits a freshly built shape to a tap point or dragged
+ *     box at insert time (#15).
+ *   - resizeHandles.ts places the Edit Shape handles on a lassoed shape
+ *     and remaps its *stored* coordinates onto the edited box (#17).
+ *   - the Edit Shape panel checks the lasso holds a single shape (#17).
  *
- * If we call `modifyLassoGeometry(g)` with the stored (pre-resize) geometry
- * plus our pen-style patch, the firmware treats our `g` as the new truth
- * and discards the pending visual transform. Result: the shape snaps back
- * to its insert-time size every time the user tweaks width/color. That's
- * exactly the friction the Reddit reviewer flagged.
- *
- * The fix is to bake the lasso-rect delta into the geometry's own
- * coordinates *before* sending modify. This module is the pure-function
- * side of that: no RN / SDK imports, so it's trivially unit-testable.
+ * No RN / SDK imports, so everything here is host-testable.
  */
 
 export type Point = {x: number; y: number};
@@ -37,7 +29,17 @@ export type Geometry = {
 };
 
 const DEG = Math.PI / 180;
-const EPSILON = 1e-6;
+
+/** Below this a length is treated as zero (a degenerate axis). */
+export const EPSILON = 1e-6;
+
+export function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(v, lo), hi);
+}
+
+export function isFiniteRect(r: Rect): boolean {
+  return [r.left, r.top, r.right, r.bottom].every(Number.isFinite);
+}
 
 /**
  * Axis-aligned bounding box of a geometry's own stored coordinates.
@@ -89,39 +91,18 @@ export function geometryNaturalBounds(g: Geometry): Rect | null {
 }
 
 /**
- * True when two rects match within the given tolerance (default 1px — e-ink
- * coordinates are integers). Used to skip baking when the user hasn't
- * actually resized the lasso.
- */
-export function boundsMatch(a: Rect, b: Rect, tol = 1): boolean {
-  return (
-    Math.abs(a.left - b.left) <= tol &&
-    Math.abs(a.right - b.right) <= tol &&
-    Math.abs(a.top - b.top) <= tol &&
-    Math.abs(a.bottom - b.bottom) <= tol
-  );
-}
-
-/**
  * Estimate how much larger than the vertex AABB the firmware's lasso rect
  * will be, purely due to stroke thickness + miter joins at polygon vertices.
  *
- * Why this exists: `geometryNaturalBounds` returns the *vertex* AABB, but
+ * `geometryNaturalBounds` returns the *vertex* AABB, but
  * `PluginCommAPI.getLassoRect()` reports the *visual* bounds, which the
  * firmware inflates by roughly half the pen-stroke extent on each side, plus
  * miter safety at sharp angles. Empirically on Chauvet firmware 3.27.41
- * (Supernote Nomad) this was 6-17px for penWidth=900 on a parallelogram —
- * see logcat-phase1.txt.
+ * (Supernote Nomad) this was 6-17px for penWidth=900 on a parallelogram.
+ * Anything clearly beyond this is a pending native lasso edit, not padding.
  *
- * If we compare natural to lasso with a 1px tolerance, that built-in padding
- * looks exactly like a user resize and we mistakenly bake it into the stored
- * coordinates on every `modifyLassoGeometry` call. The shape then visibly
- * grows by ~10-20px every time the user tweaks a property — which is exactly
- * what the v1.0.1 Reddit reviewer flagged and what v1.0.2 alpha 1 still did.
- *
- * The coefficient here (penWidth / 40, floor 10) was fitted to the logcat
- * observations. It is deliberately generous so that ordinary user resizes
- * (typically 50%+ delta on at least one axis) still trigger baking.
+ * The coefficient (penWidth / 40, floor 10) was fitted to those logcat
+ * observations and is deliberately generous.
  */
 export function defaultLassoTolerance(penWidth: number): number {
   if (!Number.isFinite(penWidth) || penWidth <= 0) {return 10;}
@@ -210,27 +191,55 @@ export function applyRectTransform(g: Geometry, fromRect: Rect, toRect: Rect): G
 }
 
 /**
- * Convenience wrapper: if the lasso rect differs from the geometry's own
- * natural bounds by more than `tol`, bake the delta into the geometry.
- * Returns the (possibly unchanged) geometry.
- *
- * When `tol` is not provided it is auto-computed from `g.penWidth` via
- * `defaultLassoTolerance` to absorb the firmware's stroke-padding inflation
- * of the lasso rect. Pass an explicit `tol` (e.g. 1) to override — that's
- * useful in unit tests that want to verify transform behavior without the
- * padding heuristic.
- *
- * Returns the input unchanged when:
- *   - the lasso rect is null,
- *   - the geometry type is unknown,
- *   - the lasso rect matches the natural bounds within tolerance
- *     (no user resize detected).
+ * Loose view of sn-plugin-lib's `LassoElementTypeNum`. The firmware may
+ * omit fields, so every value is checked before use.
  */
-export function bakeLassoResize(g: Geometry, lassoRect: Rect | null, tol?: number): Geometry {
-  if (!lassoRect) {return g;}
-  const natural = geometryNaturalBounds(g);
-  if (!natural) {return g;}
-  const effectiveTol = tol ?? defaultLassoTolerance(g.penWidth);
-  if (boundsMatch(natural, lassoRect, effectiveTol)) {return g;}
-  return applyRectTransform(g, natural, lassoRect);
+export type LassoCounts = Readonly<Record<string, unknown>>;
+
+/** Element kinds that make a lasso selection more than "one shape". */
+const NON_GEOMETRY_COUNT_FIELDS = [
+  'trailNum',
+  'titleNum',
+  'bitmapNum',
+  'normalTextBoxNum',
+  'digestTextBoxNum',
+  'digestTextBoxEditableNum',
+  'trailLinkNum',
+  'textLinkNum',
+  'todoLinkNum',
+] as const;
+
+/**
+ * True when the counts carry a numeric `geometryNum`, i.e. are usable for
+ * the strict selection rule. A failed read (null) or a firmware that omits
+ * the field is not.
+ */
+export function countsAreUsable(counts: LassoCounts | null): counts is LassoCounts {
+  return counts !== null && typeof counts.geometryNum === 'number';
+}
+
+/**
+ * True when the lasso holds exactly one geometry and nothing else (#17).
+ *
+ * `geometryCount` is the length of `getLassoGeometries()`; `counts` is
+ * `getLassoElementTypeCounts()`. Any positive non-geometry count (a stroke,
+ * a title, a text box...) refuses the selection, whether or not
+ * `geometryNum` is present: a mixed selection is never stretched through
+ * its one geometry. With usable counts `geometryNum` must also be 1.
+ * Geometry subtype counts (`polygonNum`, `circleNum`, ...) are ignored; the
+ * firmware omits zero counts entirely (confirmed on device).
+ *
+ * Counts with no evidence of other elements and no numeric `geometryNum`
+ * (see `countsAreUsable`) degrade to the geometry list alone, deliberately,
+ * like every other failed read in the panel: only the lassoed geometry is
+ * ever rewritten, never a stroke.
+ */
+export function isSingleGeometrySelection(counts: LassoCounts | null, geometryCount: number): boolean {
+  if (geometryCount !== 1) {return false;}
+  const others = counts !== null && NON_GEOMETRY_COUNT_FIELDS.some(k => {
+    const v = counts[k];
+    return typeof v === 'number' && v > 0;
+  });
+  if (others) {return false;}
+  return !countsAreUsable(counts) || counts.geometryNum === 1;
 }

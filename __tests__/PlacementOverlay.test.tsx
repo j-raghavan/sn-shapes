@@ -7,8 +7,10 @@ import React from 'react';
 import {create, act, ReactTestRenderer} from 'react-test-renderer';
 import {Text} from 'react-native';
 import PlacementOverlay, {
+  boxStyle,
   OVERLAY_TEST_IDS,
   RUBBER_BAND_THROTTLE_MS,
+  touchPoint,
 } from '../src/PlacementOverlay';
 import {DRAG_THRESHOLD_PX, PlacementTarget} from '../src/placement';
 
@@ -156,5 +158,15 @@ describe('PlacementOverlay', () => {
     });
     const f = Object.assign({}, ...[band().props.style].flat());
     expect(f).toMatchObject({left: 10, top: 10, width: 50, height: 50});
+  });
+});
+
+describe('shared helpers (reused by ResizeHandlesOverlay, #17)', () => {
+  it('touchPoint reads the root-relative pageX/pageY of a responder event', () => {
+    expect(touchPoint(touchEvent(12, 34) as never)).toEqual({x: 12, y: 34});
+  });
+
+  it('boxStyle turns a dp rect into absolute left/top/width/height', () => {
+    expect(boxStyle({left: 10, top: 20, right: 60, bottom: 100})).toEqual({left: 10, top: 20, width: 50, height: 80});
   });
 });

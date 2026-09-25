@@ -15,6 +15,8 @@
  */
 import {
   applyRectTransform,
+  clamp,
+  EPSILON,
   geometryNaturalBounds,
   Geometry,
   Point,
@@ -38,6 +40,12 @@ export type PlacementTarget =
 
 export type PlacementOptions = {threshold?: number; minSide?: number};
 
+/** Options for `placeGeometry`. All optional; `{}` is the v1.0.11 behaviour. */
+export type PlaceOptions = {
+  /** Drag only: scale uniformly to fit inside the box, centred (#17). */
+  keepAspect?: boolean;
+};
+
 /**
  * dp → page px. `sn-plugin-lib` documents geometry points as Android screen
  * coordinates, and RN's `pageX/pageY` are those px divided by density, so
@@ -45,12 +53,18 @@ export type PlacementOptions = {threshold?: number; minSide?: number};
  * rather than producing NaN geometry.
  */
 export function touchToPage(p: Point, scale: number): Point {
-  const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const s = sanitiseScale(scale);
   return {x: p.x * s, y: p.y * s};
 }
 
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), hi);
+/** Page px → dp: the inverse of `touchToPage`, with the same scale guard. */
+export function pageToTouch(p: Point, scale: number): Point {
+  const s = sanitiseScale(scale);
+  return {x: p.x / s, y: p.y / s};
+}
+
+function sanitiseScale(scale: number): number {
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
 }
 
 function clampPoint(p: Point, page: PageSize): Point {
@@ -131,9 +145,29 @@ function translateInsidePage(natural: Rect, centre: Point, page: PageSize): Rect
 }
 
 /**
+ * Largest rect with `natural`'s proportions that fits inside `box`, centred
+ * in it. A degenerate natural axis (the horizontal Line has zero height) has
+ * no aspect to keep, so the box is returned unchanged — the same rule
+ * `applyRectTransform` uses to translate rather than scale such an axis.
+ */
+export function fitRectUniform(natural: Rect, box: Rect): Rect {
+  const w = natural.right - natural.left;
+  const h = natural.bottom - natural.top;
+  if (!(w >= EPSILON && h >= EPSILON)) {return box;}
+  const bw = box.right - box.left;
+  const bh = box.bottom - box.top;
+  const s = Math.min(bw / w, bh / h);
+  const left = box.left + (bw - w * s) / 2;
+  const top = box.top + (bh - h * s) / 2;
+  return {left, top, right: left + w * s, bottom: top + h * s};
+}
+
+/**
  * Translate (tap) or fit (drag) a built geometry to the target. Circles
  * scale uniformly to the shorter side so they stay circles; every other
- * type scales per axis, matching what the native lasso handle does.
+ * type scales per axis unless `opts.keepAspect` asks for a uniform,
+ * centred fit (#17). The native lasso handle, by contrast, keeps the
+ * aspect ratio — see ADR-FREE-RESIZE.
  * Returns the input unchanged when its bounds cannot be determined.
  *
  * Generic in the geometry type: only coordinates change, the type and
@@ -141,7 +175,12 @@ function translateInsidePage(natural: Rect, centre: Point, page: PageSize): Rect
  * geometry type (e.g. the SDK one with `showLassoAfterInsert`) survives.
  * That is the one cast in this module.
  */
-export function placeGeometry<G extends Geometry>(g: G, target: PlacementTarget, page: PageSize): G {
+export function placeGeometry<G extends Geometry>(
+  g: G,
+  target: PlacementTarget,
+  page: PageSize,
+  opts: PlaceOptions = {},
+): G {
   const natural = geometryNaturalBounds(g);
   if (!natural) {return g;}
   if (target.kind === 'tap') {
@@ -165,5 +204,6 @@ export function placeGeometry<G extends Geometry>(g: G, target: PlacementTarget,
       ellipseMinorAxisRadius: r,
     };
   }
-  return applyRectTransform(g, natural, rect) as G;
+  const box = opts.keepAspect ? fitRectUniform(natural, rect) : rect;
+  return applyRectTransform(g, natural, box) as G;
 }

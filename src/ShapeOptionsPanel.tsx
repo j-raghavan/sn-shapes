@@ -1,162 +1,212 @@
 /**
- * ShapeOptionsPanel — Compact inline popover for re-styling a lassoed shape.
+ * ShapeOptionsPanel — Edit Shape's free resize behind the lasso-toolbar
+ * Shapes button (id 200, #17, ADR-FREE-RESIZE).
  *
- * STATUS: Dead product code as of v1.0.4 (2026-04-18). The toolbar button
- * id=200 is no longer registered in index.js and App.tsx unconditionally
- * renders ShapePalette. This file is retained for potential re-activation
- * as a lasso-toolbar contextual panel; see ShapePalette.tsx file header.
+ * The firmware lasso handle keeps a shape's aspect ratio and scales its
+ * stroke; the plugin cannot change that. This view opens straight into
+ * resize handles on the lassoed shape instead: corners stretch both axes
+ * freely, edges one axis, the inside moves it, a line gets its two
+ * endpoints. Nothing is written until Done.
  *
- * Original flow (for reference when re-enabling):
- *   1. Opened when the user lassos a shape and taps Shape Options in the
- *      firmware's overflow menu. App.tsx would route here on id=200.
- *   2. On mount, calls PluginCommAPI.getLassoGeometries() + getLassoRect()
- *      to read the current geometry and its lasso bounds (firmware keeps
- *      the lasso selection active while the plugin runs, confirmed via
- *      logcat line 28760 sendMenuItemEvent).
- *   3. Renders a StrokePreview at the top (shape name + sample stroke that
- *      reflects the currently-effective width/color/type), then three
- *      picker sections — Stroke Width, Stroke Color, Pen Type — and a
- *      destructive Delete button. Picker taps update a local "pending
- *      patch" instead of firing modifyLassoGeometry immediately — that way
- *      the user can adjust multiple properties in one session and commit
- *      them atomically. Tapping the overlay (outside the popup) or the ✕
- *      close button commits the pending patch via modifyLassoGeometry and
- *      closes. Tapping Delete calls deleteLassoElements() immediately
- *      (destructive actions bypass deferred-apply).
- *   4. On modify/delete success the plugin view is closed via
- *      PluginManager.closePluginView(). On error the banner shows and the
- *      panel stays open so the user can retry or change selection.
+ * Flow:
+ *   1. On mount, read lasso counts, geometries and rect plus the page size
+ *      in parallel. Until they resolve a Loading… card shows and no handle
+ *      exists, so nothing can act on a half-read selection.
+ *   2. Exactly one geometry and nothing else, with a resizable frame
+ *      (`resizeFrame`) → the handles (`ResizeHandlesOverlay`), with the
+ *      firmware lasso box hidden until any way out. Otherwise a card says
+ *      why. A failed counts read degrades to the geometry list; a failed
+ *      rect read to the stored bounds.
+ *   3. Done with the box unchanged, or Cancel, closes without writing. A
+ *      changed box is remapped from the stored geometry (`applyResize`) and
+ *      written with `modifyLassoGeometry`, re-sending every pen prop.
+ *   4. Success closes the plugin view. Failure shows in the toolbar,
+ *      keeps the handles where the user left them, and leaves the shape
+ *      untouched, so Done can be retried.
+ *
+ * DEVICE-UNVERIFIED (ADR-FREE-RESIZE): where the handles open after a
+ * native lasso resize (see the `[EDIT_SHAPE] frame` log); circle → ellipse;
+ * hiding and restoring the lasso box (`[EDIT_SHAPE] lassoBox` log).
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import {View, Text, Pressable, StyleSheet, ViewStyle} from 'react-native';
+import {View, Text, Pressable, StyleSheet} from 'react-native';
 import {PluginCommAPI, PluginManager} from 'sn-plugin-lib';
-import {bakeLassoResize, Geometry, Rect} from './lassoTransform';
 import {
-  WIDTH_PRESETS,
-  COLOR_PRESETS,
-  PEN_TYPE_PRESETS,
-  isAcceptablePenWidth,
-} from './shapes';
-import StrokePreview from './StrokePreview';
+  Geometry,
+  LassoCounts,
+  Rect,
+  countsAreUsable,
+  isSingleGeometrySelection,
+} from './lassoTransform';
+import {ApiRes, TOUCH_SCALE, resolvePageSize} from './pageSize';
+import {PageSize} from './placement';
+import ResizeHandlesOverlay from './ResizeHandlesOverlay';
+import {applyResize, editsEqual, ResizeEdit, ResizeFrame, resizeFrame} from './resizeHandles';
 
 export const TEST_IDS = {
-  overlay: 'shape-options-overlay',
-  widthButton: (w: number) => `shape-options-width-${w}`,
-  colorButton: (c: number) => `shape-options-color-${c}`,
-  penTypeButton: (t: number) => `shape-options-pentype-${t}`,
-  delete: 'shape-options-delete',
-  error: 'shape-options-error',
-  loading: 'shape-options-loading',
-  empty: 'shape-options-empty',
+  // Outer full-screen Pressable behind a message card (tap outside the
+  // card = close). The handles screen has its own Cancel instead.
+  overlay: 'edit-shape-overlay',
+  card: 'edit-shape-card',
+  close: 'edit-shape-close',
+  loading: 'edit-shape-loading',
+  unreadable: 'edit-shape-unreadable',
+  unsupported: 'edit-shape-unsupported',
+  unresizable: 'edit-shape-unresizable',
 } as const;
+
+export const UNREADABLE_MESSAGE = "Couldn't read the lassoed shape.";
+export const UNSUPPORTED_MESSAGE = 'Select a single shape to resize.';
+export const UNRESIZABLE_MESSAGE = "Can't resize this shape.";
+/** Shown for any failed write; the firmware's own error is only logged (it
+ *  can be long, and the toolbar has one short line). */
+export const RESIZE_FAILED_MESSAGE = 'Resize failed. Try again.';
 
 const ERROR_DISPLAY_MS = 2000;
 
-type ApiRes<T = unknown> = {success: boolean; result?: T; error?: {message?: string}} | null | undefined;
+// setLassoBoxState values (PluginCommAPI): 0 = show, 1 = hide.
+const LASSO_BOX_SHOW = 0;
+const LASSO_BOX_HIDE = 1;
 
-async function readFirstLassoGeometry(): Promise<Geometry | null> {
+type State =
+  | {mode: 'loading' | 'unreadable' | 'unsupported' | 'unresizable'}
+  | {mode: 'resizing'; geometry: Geometry; frame: ResizeFrame; page: PageSize};
+
+/**
+ * Show or hide the firmware lasso box. Issued synchronously (so a show
+ * reaches the host before a following closePluginView) but never awaited
+ * and never throws: a failure only leaves the box as it was.
+ * DEVICE-UNVERIFIED: that hiding and restoring behave as documented.
+ */
+function setLassoBox(state: number): void {
   try {
-    const res = (await PluginCommAPI.getLassoGeometries()) as
-      | {success: boolean; result?: unknown}
-      | null
-      | undefined;
-    if (!res?.success) {return null;}
-    const list = res.result;
-    if (!Array.isArray(list) || list.length === 0) {return null;}
-    const first = list[0];
-    if (!first || typeof first !== 'object') {return null;}
-    const g = first as Geometry;
-    if (
-      typeof g.type !== 'string' ||
-      typeof g.penColor !== 'number' ||
-      typeof g.penType !== 'number' ||
-      typeof g.penWidth !== 'number'
-    ) {
-      return null;
-    }
-    return g;
+    Promise.resolve(PluginCommAPI.setLassoBoxState(state))
+      .then(res => console.log('[EDIT_SHAPE] lassoBox', state, JSON.stringify(res)))
+      .catch(e => console.error('[EDIT_SHAPE] setLassoBoxState failed:', e));
   } catch (e) {
-    console.error('[ShapeOptionsPanel] getLassoGeometries failed:', e);
+    console.error('[EDIT_SHAPE] setLassoBoxState failed:', e);
+  }
+}
+
+function isGeometry(x: unknown): x is Geometry {
+  if (!x || typeof x !== 'object') {return false;}
+  const g = x as Geometry;
+  return (
+    typeof g.type === 'string' &&
+    typeof g.penColor === 'number' &&
+    typeof g.penType === 'number' &&
+    typeof g.penWidth === 'number'
+  );
+}
+
+/**
+ * Every lassoed geometry, or null on any API failure or malformed entry —
+ * a list we cannot fully trust must not pass the single-shape check.
+ */
+async function readLassoGeometries(): Promise<Geometry[] | null> {
+  try {
+    const res = (await PluginCommAPI.getLassoGeometries()) as ApiRes<unknown>;
+    if (!res?.success || !Array.isArray(res.result)) {return null;}
+    return res.result.every(isGeometry) ? res.result : null;
+  } catch (e) {
+    console.error('[EDIT_SHAPE] getLassoGeometries failed:', e);
     return null;
   }
 }
 
-/**
- * Reads the current lasso box bounds. The lasso rect is the "visual" size
- * the user sees after any native resize gesture, and differs from the
- * geometry's own stored coordinates when a resize is pending. Returns null
- * on any API or shape failure — callers should fall back to modifying
- * without a resize bake (i.e. v1.0.1 behavior).
- */
+/** Current lasso box bounds (the visual size after any native resize), or null. */
 async function readLassoRect(): Promise<Rect | null> {
   try {
-    const res = (await PluginCommAPI.getLassoRect()) as
-      | {success: boolean; result?: unknown}
-      | null
-      | undefined;
+    const res = (await PluginCommAPI.getLassoRect()) as ApiRes<Partial<Rect>>;
     if (!res?.success) {return null;}
-    const r = res.result as Partial<Rect> | null | undefined;
-    if (
-      !r ||
-      typeof r.left !== 'number' ||
-      typeof r.right !== 'number' ||
-      typeof r.top !== 'number' ||
-      typeof r.bottom !== 'number'
-    ) {
+    const r = res.result;
+    // Any non-finite side (NaN included) → the caller falls back to the
+    // geometry's natural bounds.
+    if (!r || ![r.left, r.right, r.top, r.bottom].every(Number.isFinite)) {
       return null;
     }
-    return {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+    const {left, right, top, bottom} = r as Rect;
+    return {left, right, top, bottom};
   } catch (e) {
-    console.error('[ShapeOptionsPanel] getLassoRect failed:', e);
+    console.error('[EDIT_SHAPE] getLassoRect failed:', e);
     return null;
   }
 }
 
-type PendingPatch = Partial<Pick<Geometry, 'penWidth' | 'penColor' | 'penType'>>;
-
-/**
- * Visual approximation of each pen type for the picker buttons. The true
- * rendering happens in firmware so we can only hint at the difference: a
- * fineliner is thin & uniform; a pressure pen is slightly thicker with
- * rounded ends; a marker is fat and translucent; calligraphy gets a slight
- * skew. Always renders in solid black so the picker shows TYPE differences
- * — colour is communicated separately by the StrokePreview at the top.
- */
-export function penTypeStrokeStyle(penType: number): ViewStyle {
-  switch (penType) {
-    case 1: // Pressure pen — slightly tapered feel via rounded ends
-      return {height: 3, opacity: 1, borderRadius: 1.5};
-    case 11: // Marker — thick + translucent
-      return {height: 7, opacity: 0.55};
-    case 14: // Calligraphy — angled
-      return {height: 4, opacity: 1, transform: [{skewX: '-15deg'}]};
-    case 10: // Fineliner — thin uniform (also the default fallback)
-    default:
-      return {height: 2, opacity: 1};
+/** Lasso element counts, logged so a device run shows what the firmware reports. */
+async function readLassoCounts(): Promise<LassoCounts | null> {
+  try {
+    // The SDK's LassoElementTypeNum class has no index signature; read it loosely.
+    const res = (await PluginCommAPI.getLassoElementTypeCounts()) as unknown as ApiRes<LassoCounts>;
+    console.log('[EDIT_SHAPE] counts', JSON.stringify(res));
+    return res?.success && res.result && typeof res.result === 'object' ? res.result : null;
+  } catch (e) {
+    console.error('[EDIT_SHAPE] getLassoElementTypeCounts failed:', e);
+    return null;
   }
 }
 
-export default function ShapeOptionsPanel() {
-  const [geometry, setGeometry] = useState<Geometry | null>(null);
-  const [lassoRect, setLassoRect] = useState<Rect | null>(null);
-  const [pendingPatch, setPendingPatch] = useState<PendingPatch>({});
-  const [loading, setLoading] = useState(true);
+/** `scale` is a test seam; production uses the device's dp → px ratio. */
+export type ShapeOptionsPanelProps = {scale?: number};
+
+export default function ShapeOptionsPanel({scale = TOUCH_SCALE}: ShapeOptionsPanelProps) {
+  const [state, setState] = useState<State>({mode: 'loading'});
   const [error, setError] = useState<string | null>(null);
+  // busyRef is the synchronous guard (a second Done in the same tick);
+  // `busy` drives the UI so the handles and buttons go inert meanwhile.
   const busyRef = useRef(false);
+  const [busy, setBusy] = useState(false);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Our handles replace the firmware lasso box while they are up; this
+  // records that it is hidden so every way out restores it exactly once.
+  const lassoHiddenRef = useRef(false);
+
+  const restoreLassoBox = useCallback(() => {
+    if (!lassoHiddenRef.current) {return;}
+    lassoHiddenRef.current = false;
+    setLassoBox(LASSO_BOX_SHOW);
+  }, []);
 
   useEffect(() => {
-    // Read geometry and lasso rect in parallel. Either can be null; we
-    // tolerate missing rect by just not baking (falls back to v1.0.1).
-    Promise.all([readFirstLassoGeometry(), readLassoRect()]).then(([g, r]) => {
-      setGeometry(g);
-      setLassoRect(r);
-      setLoading(false);
-    });
+    let cancelled = false;
+    Promise.all([readLassoCounts(), readLassoGeometries(), readLassoRect(), resolvePageSize()])
+      .then(([counts, geometries, rect, page]) => {
+        if (cancelled) {return;}
+        if (!geometries) {
+          setState({mode: 'unreadable'});
+          return;
+        }
+        if (!countsAreUsable(counts)) {
+          console.warn('[EDIT_SHAPE] counts unavailable, falling back to geometry list');
+        }
+        if (!isSingleGeometrySelection(counts, geometries.length)) {
+          setState({mode: 'unsupported'});
+          return;
+        }
+        const geometry = geometries[0];
+        const frame = resizeFrame(geometry, rect);
+        if (!frame) {
+          setState({mode: 'unresizable'});
+          return;
+        }
+        // Device probe for where the handles open (ADR-FREE-RESIZE).
+        console.log('[EDIT_SHAPE] frame', JSON.stringify({
+          natural: frame.stored, lassoRect: rect, pending: frame.pending, start: frame.start,
+        }));
+        lassoHiddenRef.current = true;
+        setLassoBox(LASSO_BOX_HIDE);
+        setState({mode: 'resizing', geometry, frame, page});
+      })
+      .catch(e => {
+        console.error('[EDIT_SHAPE] setup failed:', e);
+        if (!cancelled) {setState({mode: 'unresizable'});}
+      });
     return () => {
+      cancelled = true;
       if (errorTimerRef.current) {clearTimeout(errorTimerRef.current);}
+      restoreLassoBox();
     };
-  }, []);
+  }, [restoreLassoBox]);
 
   const showError = useCallback((msg: string) => {
     setError(msg);
@@ -164,249 +214,102 @@ export default function ShapeOptionsPanel() {
     errorTimerRef.current = setTimeout(() => setError(null), ERROR_DISPLAY_MS);
   }, []);
 
-  // Effective values shown as "selected" in the UI and fed to StrokePreview.
-  // Unset fields fall back to the geometry's current value so the initial
-  // render mirrors the shape's actual state before the user picks anything.
-  const effectiveWidth = pendingPatch.penWidth ?? geometry?.penWidth;
-  const effectiveColor = pendingPatch.penColor ?? geometry?.penColor;
-  const effectivePenType = pendingPatch.penType ?? geometry?.penType;
-
-  /**
-   * Filter the pending patch to only fields that actually differ from the
-   * geometry. Avoids sending a no-op modifyLassoGeometry just because the
-   * user re-tapped the already-selected option.
-   */
-  const computeRealChanges = useCallback(
-    (g: Geometry, patch: PendingPatch): PendingPatch => {
-      const out: PendingPatch = {};
-      if (patch.penWidth != null && patch.penWidth !== g.penWidth) {
-        out.penWidth = patch.penWidth;
-      }
-      if (patch.penColor != null && patch.penColor !== g.penColor) {
-        out.penColor = patch.penColor;
-      }
-      if (patch.penType != null && patch.penType !== g.penType) {
-        out.penType = patch.penType;
-      }
-      return out;
-    },
-    [],
-  );
-
-  const commitAndClose = useCallback(async () => {
+  // Closing mid-modify would drop the result on the floor (no message if
+  // it fails), so every close path is ignored while one is in flight.
+  const close = useCallback(() => {
     if (busyRef.current) {return;}
-    // Nothing loaded yet (still in loading state) — just close.
-    if (!geometry) {
+    restoreLassoBox();
+    PluginManager.closePluginView();
+  }, [restoreLassoBox]);
+
+  const handleDone = useCallback(async (geometry: Geometry, frame: ResizeFrame, edit: ResizeEdit) => {
+    if (busyRef.current) {return;}
+    // Unchanged: nothing to write, whatever the start-box estimate was.
+    if (editsEqual(edit, frame.start)) {
+      restoreLassoBox();
       PluginManager.closePluginView();
       return;
     }
-    const realChanges = computeRealChanges(geometry, pendingPatch);
-    if (Object.keys(realChanges).length === 0) {
-      // No real changes — close without calling modify.
-      PluginManager.closePluginView();
+    const next = applyResize(geometry, edit);
+    if (!next) {
+      showError(UNRESIZABLE_MESSAGE);
       return;
     }
     busyRef.current = true;
-    setError(null);
+    setBusy(true);
+    let closing = false;
     try {
-      // Bake any pending lasso-resize into the geometry's own coordinates
-      // BEFORE merging the pen patch. Without this, modifyLassoGeometry
-      // sees the stored (pre-resize) geometry and the firmware discards
-      // the user's resize, snapping the shape back to its insert-time
-      // size. `bakeLassoResize` is a no-op when lassoRect is null, when it
-      // matches the natural bounds within the penWidth-aware tolerance, or
-      // when the geometry type is unknown — so this is safe on devices or
-      // flows where the rect API isn't available.
-      const baked = bakeLassoResize(geometry, lassoRect);
-      const merged: Geometry = {...baked, ...realChanges};
-      const res = (await PluginCommAPI.modifyLassoGeometry(merged)) as ApiRes;
-      if (!res?.success) {
-        const msg = res?.error?.message ?? 'Modify failed';
-        showError(msg);
+      // The full geometry goes back, so pen props are re-sent with the
+      // new coordinates rather than left to the firmware to carry over.
+      const res = (await PluginCommAPI.modifyLassoGeometry(next)) as ApiRes<unknown>;
+      // The SDK documents `result: false` as "update failed", even with
+      // `success: true`.
+      if (!res?.success || res.result === false) {
+        console.error('[EDIT_SHAPE] modifyLassoGeometry failed:', JSON.stringify(res));
+        showError(RESIZE_FAILED_MESSAGE);
         return;
       }
+      console.log('[EDIT_SHAPE] modifyLassoGeometry', JSON.stringify(res));
+      closing = true;
+      restoreLassoBox();
       PluginManager.closePluginView();
     } catch (e) {
-      showError(e instanceof Error ? e.message : 'Modify failed');
+      console.error('[EDIT_SHAPE] modifyLassoGeometry failed:', e);
+      showError(RESIZE_FAILED_MESSAGE);
     } finally {
-      busyRef.current = false;
-    }
-  }, [geometry, lassoRect, pendingPatch, computeRealChanges, showError]);
-
-  const handleWidthPress = useCallback((value: number) => {
-    if (busyRef.current) {return;}
-    // Defense-in-depth: GeometrySchema.penWidth has min=MIN_PEN_WIDTH on
-    // the native bridge. Reject anything below that here so a stray
-    // caller (or a future edit to WIDTH_PRESETS) can never produce a
-    // verify error from modifyLassoGeometry. Non-finite values are also
-    // dropped — the presets are integers, so anything else is a bug.
-    if (!isAcceptablePenWidth(value)) {return;}
-    setPendingPatch(prev => ({...prev, penWidth: value}));
-  }, []);
-
-  const handleColorPress = useCallback((value: number) => {
-    if (busyRef.current) {return;}
-    setPendingPatch(prev => ({...prev, penColor: value}));
-  }, []);
-
-  const handlePenTypePress = useCallback((value: number) => {
-    if (busyRef.current) {return;}
-    setPendingPatch(prev => ({...prev, penType: value}));
-  }, []);
-
-  const handleDelete = useCallback(async () => {
-    if (busyRef.current) {return;}
-    busyRef.current = true;
-    setError(null);
-    try {
-      const res = (await PluginCommAPI.deleteLassoElements()) as ApiRes;
-      if (!res?.success) {
-        const msg = res?.error?.message ?? 'Delete failed';
-        showError(msg);
-        return;
+      // The view is going away on success; stay busy so nothing else runs.
+      // On failure the handles stay up (lasso box still hidden) for a retry.
+      if (!closing) {
+        busyRef.current = false;
+        setBusy(false);
       }
-      PluginManager.closePluginView();
-    } catch (e) {
-      showError(e instanceof Error ? e.message : 'Delete failed');
-    } finally {
-      busyRef.current = false;
     }
-  }, [showError]);
+  }, [restoreLassoBox, showError]);
 
+  if (state.mode === 'resizing') {
+    const {geometry, frame} = state;
+    return (
+      <ResizeHandlesOverlay
+        start={frame.start}
+        page={state.page}
+        scale={scale}
+        busy={busy}
+        message={error}
+        onCancel={close}
+        onDone={edit => handleDone(geometry, frame, edit)}
+      />
+    );
+  }
+
+  const cards = {
+    loading: {testID: TEST_IDS.loading, text: 'Loading…'},
+    unreadable: {testID: TEST_IDS.unreadable, text: UNREADABLE_MESSAGE},
+    unsupported: {testID: TEST_IDS.unsupported, text: UNSUPPORTED_MESSAGE},
+    unresizable: {testID: TEST_IDS.unresizable, text: UNRESIZABLE_MESSAGE},
+  };
+  const card = cards[state.mode];
   return (
-    <Pressable testID={TEST_IDS.overlay} style={styles.container} onPress={commitAndClose}>
-      <Pressable style={styles.panel} onPress={e => e.stopPropagation()}>
+    <Pressable testID={TEST_IDS.overlay} style={styles.container} onPress={close}>
+      <Pressable testID={TEST_IDS.card} style={styles.card} onPress={e => e.stopPropagation()}>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Shape Options</Text>
+          <Text style={styles.title}>Resize Shape</Text>
           <Pressable
-            onPress={commitAndClose}
+            testID={TEST_IDS.close}
+            onPress={close}
             style={({pressed}) => [styles.closeBtn, pressed && styles.closeBtnPressed]}>
             <Text style={styles.closeText}>✕</Text>
           </Pressable>
         </View>
         <View style={styles.divider} />
-
-        {loading && (
-          <View testID={TEST_IDS.loading} style={styles.centerRow}>
-            <Text style={styles.helperText}>Loading…</Text>
-          </View>
-        )}
-
-        {!loading && !geometry && (
-          <View testID={TEST_IDS.empty} style={styles.centerRow}>
-            <Text style={styles.helperText}>No shape selected</Text>
-          </View>
-        )}
-
-        {error && (
-          <View testID={TEST_IDS.error} style={styles.errorBanner}>
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        )}
-
-        {!loading && geometry && (
-          <View style={styles.body}>
-            <StrokePreview
-              shapeType={geometry.type}
-              penWidth={effectiveWidth}
-              penColor={effectiveColor}
-              penType={effectivePenType}
-            />
-
-            <View style={styles.rowDivider} />
-
-            <Text style={styles.sectionLabel}>Stroke Width</Text>
-            <View style={styles.widthRow}>
-              {WIDTH_PRESETS.map(p => {
-                const selected = effectiveWidth === p.value;
-                return (
-                  <Pressable
-                    key={p.value}
-                    testID={TEST_IDS.widthButton(p.value)}
-                    onPress={() => handleWidthPress(p.value)}
-                    style={({pressed}) => [
-                      styles.widthBtn,
-                      selected && styles.widthBtnSelected,
-                      pressed && styles.widthBtnPressed,
-                    ]}>
-                    <View
-                      style={[
-                        styles.widthPreview,
-                        {height: Math.max(2, Math.round(p.value / 100))},
-                      ]}
-                    />
-                    <Text style={styles.widthLabel}>{p.mm.toFixed(2)}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <View style={styles.rowDivider} />
-
-            <Text style={styles.sectionLabel}>Stroke Color</Text>
-            <View style={styles.row}>
-              {COLOR_PRESETS.map(c => {
-                const selected = effectiveColor === c.value;
-                return (
-                  <Pressable
-                    key={c.value}
-                    testID={TEST_IDS.colorButton(c.value)}
-                    onPress={() => handleColorPress(c.value)}
-                    style={({pressed}) => [
-                      styles.colorBtn,
-                      selected && styles.colorBtnSelected,
-                      pressed && styles.colorBtnPressed,
-                    ]}>
-                    <View style={[styles.colorSwatch, {backgroundColor: c.swatch}]} />
-                    <Text style={styles.colorLabel}>{c.label}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <View style={styles.rowDivider} />
-
-            <Text style={styles.sectionLabel}>Pen Type</Text>
-            <View style={styles.row}>
-              {PEN_TYPE_PRESETS.map(t => {
-                const selected = effectivePenType === t.value;
-                return (
-                  <Pressable
-                    key={t.value}
-                    testID={TEST_IDS.penTypeButton(t.value)}
-                    onPress={() => handlePenTypePress(t.value)}
-                    style={({pressed}) => [
-                      styles.penTypeBtn,
-                      selected && styles.penTypeBtnSelected,
-                      pressed && styles.penTypeBtnPressed,
-                    ]}>
-                    <View style={styles.penTypeStrokeWrapper}>
-                      <View
-                        style={[styles.penTypeStroke, penTypeStrokeStyle(t.value)]}
-                      />
-                    </View>
-                    <Text style={styles.penTypeLabel}>{t.label}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <View style={styles.rowDivider} />
-
-            <Pressable
-              testID={TEST_IDS.delete}
-              onPress={handleDelete}
-              style={({pressed}) => [styles.deleteBtn, pressed && styles.deleteBtnPressed]}>
-              <Text style={styles.deleteText}>Delete Shape</Text>
-            </Pressable>
-          </View>
-        )}
+        <View testID={card.testID} style={styles.centerRow}>
+          <Text style={styles.helperText}>{card.text}</Text>
+        </View>
       </Pressable>
     </Pressable>
   );
 }
 
-const PANEL_PADDING = 12;
+const PANEL_PADDING = 10;
 
 const styles = StyleSheet.create({
   container: {
@@ -415,36 +318,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  panel: {
-    // Width is set to fit 9 width-preset buttons in one row without
-    // cramping the tap target. 400 px × ~42 px/button is comfortable
-    // stylus territory on Nomad (1404 px wide screen).
-    width: 400,
+  card: {
+    width: 280,
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#000000',
-    paddingBottom: PANEL_PADDING,
   },
   headerRow: {
     paddingHorizontal: PANEL_PADDING,
-    paddingVertical: 12,
+    paddingVertical: 8,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
   },
   title: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
     color: '#000000',
   },
   closeBtn: {
     position: 'absolute',
     right: PANEL_PADDING,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     borderWidth: 1.5,
     borderColor: '#000000',
     alignItems: 'center',
@@ -454,7 +353,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
   },
   closeText: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: 'bold',
     color: '#000000',
   },
@@ -463,155 +362,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#CCCCCC',
   },
   centerRow: {
-    padding: 20,
+    padding: 16,
     alignItems: 'center',
   },
   helperText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#555555',
-  },
-  errorBanner: {
-    marginHorizontal: PANEL_PADDING,
-    marginTop: 8,
-    backgroundColor: '#1A1A1A',
-    borderRadius: 4,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-  },
-  errorText: {
-    color: '#FFFFFF',
-    fontSize: 13,
     textAlign: 'center',
-  },
-  body: {
-    paddingHorizontal: PANEL_PADDING,
-    paddingTop: 10,
-  },
-  sectionLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 6,
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 6,
-  },
-  widthRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    // Tighter gap than `row` since 9 buttons need to fit; the larger gap
-    // was tuned for 3–5 buttons and would push overflow off-screen.
-    gap: 3,
-  },
-  rowDivider: {
-    height: 1,
-    backgroundColor: '#E5E5E5',
-    marginVertical: 10,
-  },
-  widthBtn: {
-    flex: 1,
-    paddingVertical: 6,
-    paddingHorizontal: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#CCCCCC',
-    gap: 4,
-  },
-  widthBtnSelected: {
-    borderColor: '#000000',
-    borderWidth: 2,
-  },
-  widthBtnPressed: {
-    backgroundColor: '#F0F0F0',
-  },
-  widthPreview: {
-    width: 20,
-    backgroundColor: '#000000',
-    borderRadius: 2,
-  },
-  widthLabel: {
-    // Smaller font so the mm readout fits a ~40 px wide button.
-    fontSize: 10,
-    color: '#000000',
-    fontWeight: '600',
-  },
-  penTypeBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#CCCCCC',
-    gap: 4,
-  },
-  penTypeBtnSelected: {
-    borderColor: '#000000',
-    borderWidth: 2,
-  },
-  penTypeBtnPressed: {
-    backgroundColor: '#F0F0F0',
-  },
-  penTypeStrokeWrapper: {
-    height: 12,
-    width: '100%',
-    justifyContent: 'center',
-    paddingHorizontal: 6,
-  },
-  penTypeStroke: {
-    width: '100%',
-    backgroundColor: '#000000',
-  },
-  penTypeLabel: {
-    fontSize: 10,
-    color: '#000000',
-    fontWeight: '600',
-  },
-  colorBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#CCCCCC',
-    gap: 6,
-  },
-  colorBtnSelected: {
-    borderColor: '#000000',
-    borderWidth: 2,
-  },
-  colorBtnPressed: {
-    backgroundColor: '#F0F0F0',
-  },
-  colorSwatch: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#000000',
-  },
-  colorLabel: {
-    fontSize: 11,
-    color: '#000000',
-    fontWeight: '600',
-  },
-  deleteBtn: {
-    backgroundColor: '#1A1A1A',
-    borderRadius: 6,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  deleteBtnPressed: {
-    backgroundColor: '#333333',
-  },
-  deleteText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: 'bold',
   },
 });

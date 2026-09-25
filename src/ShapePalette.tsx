@@ -49,11 +49,10 @@
  *     offered was already set at insert time. Per user direction
  *     2026-04-18, the id=200 button + ShapeOptionsPanel routing were
  *     removed; this popup is now the only entry point for shapes.
- *   - ShapeOptionsPanel.tsx is retained as dead product code: it
- *     implements the lasso-toolbar re-style panel that may be revived
- *     in a future release. The WIDTH_PRESETS / COLOR_PRESETS /
- *     PEN_TYPE_PRESETS constants it used to own have all been moved to
- *     shapes.ts. Nothing in ShapePalette imports from ShapeOptionsPanel.
+ *   - #17 brought id=200 back for the one thing this popup cannot do:
+ *     ShapeOptionsPanel.tsx is now Edit Shape (resize handles on a
+ *     lassoed shape). Styling still lives here only; nothing in
+ *     ShapePalette imports from ShapeOptionsPanel.
  *
  * Why deferred-apply (instead of tap-to-insert + style after):
  *   - Firmware bug: modifyLassoGeometry silently drops pen props in
@@ -70,12 +69,10 @@ import {
   StyleSheet,
   ImageSourcePropType,
   ScrollView,
-  PixelRatio,
 } from 'react-native';
 import {
   PluginCommAPI,
   PluginManager,
-  PluginFileAPI,
 } from 'sn-plugin-lib';
 import {
   SHAPES,
@@ -103,6 +100,18 @@ import {
   FavoritesStorage,
   getDefaultFavoritesStorage,
 } from './favoritesStorage';
+import {
+  ApiRes,
+  DEFAULT_PAGE_HEIGHT,
+  DEFAULT_PAGE_WIDTH,
+  TOUCH_SCALE,
+  resolvePageSize,
+} from './pageSize';
+import {
+  DEFAULT_PREFERENCES,
+  PreferencesStorage,
+  getDefaultPreferencesStorage,
+} from './preferencesStorage';
 
 // 2026-04-18 design change: the Pen Type picker is intentionally NOT
 // rendered here. Pen type is already a top-level selection in the
@@ -118,8 +127,8 @@ import {
 // Types & constants
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_PAGE_WIDTH = 1404;
-export const DEFAULT_PAGE_HEIGHT = 1872;
+// Re-exported so existing importers keep resolving them from here.
+export {DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT};
 
 export const TEST_IDS = {
   overlay: OVERLAY_TEST_IDS.overlay,
@@ -163,6 +172,9 @@ export const TEST_IDS = {
   // category with no entries.
   favoriteToggle: 'shapes-favorite-toggle',
   favoritesEmpty: 'shapes-favorites-empty',
+  // "Keep aspect ratio" checkbox (#17) — controls how a dragged box sizes
+  // the shape (uniform fit vs per-axis fill).
+  keepAspect: 'shapes-keep-aspect',
 } as const;
 
 /**
@@ -304,49 +316,9 @@ const GRID_HEIGHT_PX =
   (MAX_GRID_ROWS - 1) * GRID_GAP +
   GRID_VERTICAL_PADDING_PX;
 
-// Local narrow type for sn-plugin-lib responses. The SDK declares its
-// methods as returning the generic `Object` type, so TS doesn't know
-// about the `{success, result}` envelope the firmware actually returns.
-type ApiRes<T> = {success: boolean; result?: T; error?: {message?: string}} | null | undefined;
-
-// dp → page px. `sn-plugin-lib` documents geometry points as Android
-// screen px and RN reports touches in dp (px / density), so one multiply
-// recovers the firmware coordinate space. Constant per device, hence
-// module-level (ADR-PEN-PLACEMENT D2). DEVICE-UNVERIFIED on Manta.
-const TOUCH_SCALE = PixelRatio.get();
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function resolvePageSize(): Promise<{width: number; height: number}> {
-  try {
-    // Fire both independent calls concurrently; getPageSize waits for both.
-    const [pathRaw, pageRaw] = await Promise.all([
-      PluginCommAPI.getCurrentFilePath(),
-      PluginCommAPI.getCurrentPageNum(),
-    ]);
-    const pathRes = pathRaw as ApiRes<string>;
-    const pageRes = pageRaw as ApiRes<number>;
-    if (
-      pathRes?.success &&
-      pageRes?.success &&
-      typeof pathRes.result === 'string' &&
-      typeof pageRes.result === 'number'
-    ) {
-      const sizeRes = (await PluginFileAPI.getPageSize(
-        pathRes.result,
-        pageRes.result,
-      )) as ApiRes<{width: number; height: number}>;
-      if (sizeRes?.success && sizeRes.result) {
-        return sizeRes.result;
-      }
-    }
-  } catch {
-    // Fall through to defaults.
-  }
-  return {width: DEFAULT_PAGE_WIDTH, height: DEFAULT_PAGE_HEIGHT};
-}
 
 /**
  * Insert a shape at the pen's placement target with the user's chosen
@@ -374,6 +346,7 @@ async function insertShape(
   style: PenStyle,
   target: PlacementTarget,
   page: PageSize,
+  keepAspect: boolean,
 ): Promise<void> {
   const params = Object.fromEntries(
     shape.parameters.map(p => [p.id, p.defaultValue]),
@@ -381,7 +354,7 @@ async function insertShape(
   // Build at the page centre with default params, then let placement
   // translate (tap) or fit (drag) it — shapes stay ignorant of gestures.
   const built = shape.build({x: page.width / 2, y: page.height / 2}, params, style);
-  const geometry = placeGeometry(built, target, page);
+  const geometry = placeGeometry(built, target, page, {keepAspect});
   // Auto-lasso the element so users can immediately drag it — the
   // element IS the shape.
   geometry.showLassoAfterInsert = true;
@@ -403,15 +376,16 @@ const ERROR_DISPLAY_MS = 2000;
 
 /**
  * Props are optional so the public mounting path (PluginManager → render)
- * stays a no-arg component. The `storage` seam exists for tests and for
- * future native KV backends — production renders use the AsyncStorage
- * default (or its in-memory fallback when the dep is absent).
+ * stays a no-arg component. The `storage` / `preferences` seams exist for
+ * tests and for future native KV backends — production renders use the
+ * AsyncStorage default (or its in-memory fallback when the dep is absent).
  */
 export type ShapePaletteProps = {
   storage?: FavoritesStorage;
+  preferences?: PreferencesStorage;
 };
 
-export default function ShapePalette({storage}: ShapePaletteProps = {}) {
+export default function ShapePalette({storage, preferences}: ShapePaletteProps = {}) {
   const insertingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -452,6 +426,22 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
   const storageImpl = useMemo(
     () => storage ?? getDefaultFavoritesStorage(),
     [storage],
+  );
+
+  // "Keep aspect ratio" (#17). Hydrated from `preferences` on mount, but a
+  // toggle made before load() resolves wins: the user's explicit choice
+  // must never be clobbered by the stored one (and, unlike the favorites
+  // heart, there is no need to disable the control while loading). Saved
+  // from the toggle handler only, so the initial default is never written
+  // over the on-disk value. `keepAspectRef` mirrors the latest value so two
+  // taps landing before a re-render each flip it (a closure over the state
+  // would compute — and save — the same value twice).
+  const [keepAspect, setKeepAspect] = useState(DEFAULT_PREFERENCES.keepAspect);
+  const keepAspectRef = useRef(DEFAULT_PREFERENCES.keepAspect);
+  const keepAspectTouchedRef = useRef(false);
+  const preferencesImpl = useMemo(
+    () => preferences ?? getDefaultPreferencesStorage(),
+    [preferences],
   );
 
   // ScrollView ref so we can reset to y=0 whenever the category changes —
@@ -499,6 +489,18 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
     if (!favoritesHydrated) {return;}
     storageImpl.save(favorites);
   }, [favorites, favoritesHydrated, storageImpl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    preferencesImpl.load().then(loaded => {
+      if (cancelled || keepAspectTouchedRef.current) {return;}
+      keepAspectRef.current = loaded.keepAspect;
+      setKeepAspect(loaded.keepAspect);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [preferencesImpl]);
 
   // Shapes shown in the grid right now. 'favorites' is dynamically
   // populated from the user's curated list; every other category is a
@@ -583,6 +585,15 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
     setFavorites(result.favorites);
   }, [favorites, favoritesHydrated, selectedId, showError]);
 
+  const handleToggleKeepAspect = useCallback(() => {
+    if (insertingRef.current) {return;}
+    keepAspectTouchedRef.current = true;
+    const next = !keepAspectRef.current;
+    keepAspectRef.current = next;
+    setKeepAspect(next);
+    preferencesImpl.save({keepAspect: next});
+  }, [preferencesImpl]);
+
   /**
    * Advance the carousel to the previous (-1) or next (+1) group.
    *
@@ -638,7 +649,7 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
       errorTimerRef.current = null;
     }
     try {
-      await insertShape(selectedShape, style, target, page);
+      await insertShape(selectedShape, style, target, page, keepAspect);
       PluginManager.closePluginView();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Insert failed';
@@ -646,7 +657,7 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
     } finally {
       insertingRef.current = false;
     }
-  }, [selectedShape, style, page, showError]);
+  }, [selectedShape, style, page, keepAspect, showError]);
 
   return (
     <PlacementOverlay page={page} scale={TOUCH_SCALE} onCommit={commitAt}>
@@ -829,6 +840,22 @@ export default function ShapePalette({storage}: ShapePaletteProps = {}) {
               })}
             </View>
           </View>
+
+          <View style={styles.divider} />
+
+          {/* Row 4 — Keep aspect ratio (#17). Only affects a drag: when
+              checked the shape keeps its proportions and is centred in the
+              box; unchecked it stretches to fill the box (v1.0.11). */}
+          <Pressable
+            testID={TEST_IDS.keepAspect}
+            onPress={handleToggleKeepAspect}
+            hitSlop={6}
+            accessibilityRole="checkbox"
+            accessibilityState={{checked: keepAspect}}
+            style={({pressed}) => [styles.checkboxRow, pressed && styles.checkboxRowPressed]}>
+            <Text style={styles.checkboxGlyph}>{keepAspect ? '☑' : '☐'}</Text>
+            <Text style={styles.checkboxLabel}>Keep aspect ratio</Text>
+          </Pressable>
 
           <View style={styles.divider} />
 
@@ -1147,6 +1174,27 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#000000',
     fontWeight: '600',
+  },
+  // Full-width tap target for the Keep aspect ratio checkbox; label type
+  // matches sectionLabel so the row reads as a peer of the pickers.
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    borderRadius: 4,
+  },
+  checkboxRowPressed: {
+    backgroundColor: '#F0F0F0',
+  },
+  checkboxGlyph: {
+    fontSize: 16,
+    color: '#000000',
+  },
+  checkboxLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#000000',
   },
   // Centred hint sitting below the pickers. Muted grey + small size so
   // it doesn't compete with the interactive rows for attention — reads as
