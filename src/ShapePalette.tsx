@@ -433,8 +433,11 @@ export default function ShapePalette({storage, preferences}: ShapePaletteProps =
   // must never be clobbered by the stored one (and, unlike the favorites
   // heart, there is no need to disable the control while loading). Saved
   // from the toggle handler only, so the initial default is never written
-  // over the on-disk value.
+  // over the on-disk value. `keepAspectRef` mirrors the latest value so two
+  // taps landing before a re-render each flip it (a closure over the state
+  // would compute — and save — the same value twice).
   const [keepAspect, setKeepAspect] = useState(DEFAULT_PREFERENCES.keepAspect);
+  const keepAspectRef = useRef(DEFAULT_PREFERENCES.keepAspect);
   const keepAspectTouchedRef = useRef(false);
   const preferencesImpl = useMemo(
     () => preferences ?? getDefaultPreferencesStorage(),
@@ -491,6 +494,7 @@ export default function ShapePalette({storage, preferences}: ShapePaletteProps =
     let cancelled = false;
     preferencesImpl.load().then(loaded => {
       if (cancelled || keepAspectTouchedRef.current) {return;}
+      keepAspectRef.current = loaded.keepAspect;
       setKeepAspect(loaded.keepAspect);
     });
     return () => {
@@ -584,10 +588,11 @@ export default function ShapePalette({storage, preferences}: ShapePaletteProps =
   const handleToggleKeepAspect = useCallback(() => {
     if (insertingRef.current) {return;}
     keepAspectTouchedRef.current = true;
-    const next = !keepAspect;
+    const next = !keepAspectRef.current;
+    keepAspectRef.current = next;
     setKeepAspect(next);
     preferencesImpl.save({keepAspect: next});
-  }, [keepAspect, preferencesImpl]);
+  }, [preferencesImpl]);
 
   /**
    * Advance the carousel to the previous (-1) or next (+1) group.

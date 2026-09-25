@@ -1411,6 +1411,28 @@ describe('ShapePalette (merged popup)', () => {
       expect(calls[1][0]).toEqual(calls[0][0]);
     });
 
+    it('two taps before a re-render flip twice and save each value', async () => {
+      const prefs = createMemoryPreferencesStorage();
+      const save = jest.spyOn(prefs, 'save');
+      const tree = await mountPalette(undefined, prefs);
+      const onPress = checkbox(tree).props.onPress;
+      await act(async () => {
+        onPress();
+        onPress();
+        await flushPromises();
+      });
+      expect(save.mock.calls).toEqual([[{keepAspect: true}], [{keepAspect: false}]]);
+      expect(isChecked(tree)).toBe(false);
+    });
+
+    it('a toggle after hydration flips the loaded value', async () => {
+      const prefs = createMemoryPreferencesStorage({keepAspect: true});
+      const tree = await mountPalette(undefined, prefs);
+      await toggle(tree);
+      expect(isChecked(tree)).toBe(false);
+      expect(await prefs.load()).toEqual({keepAspect: false});
+    });
+
     it('AC3.3: a stored true is shown checked after hydration', async () => {
       const tree = await mountPalette(undefined, createMemoryPreferencesStorage({keepAspect: true}));
       expect(isChecked(tree)).toBe(true);
