@@ -8,6 +8,8 @@ import {
   boundsMatch,
   bakeLassoResize,
   defaultLassoTolerance,
+  isSingleGeometrySelection,
+  resizeGeometryTo,
   Rect,
   Geometry,
 } from '../src/lassoTransform';
@@ -457,5 +459,123 @@ describe('bakeLassoResize', () => {
     expect(bakeLassoResize(parallelogram, slightlyOff)).toBe(parallelogram);
     // With explicit 1px tol: bakes.
     expect(bakeLassoResize(parallelogram, slightlyOff, 1)).not.toBe(parallelogram);
+  });
+});
+
+describe('isSingleGeometrySelection (#17, AC5.1)', () => {
+  it('degrades to the geometry list when counts are unavailable', () => {
+    expect(isSingleGeometrySelection(null, 1)).toBe(true);
+    expect(isSingleGeometrySelection(null, 0)).toBe(false);
+    expect(isSingleGeometrySelection(null, 2)).toBe(false);
+  });
+
+  it('accepts exactly one geometry and nothing else', () => {
+    expect(isSingleGeometrySelection({geometryNum: 1}, 1)).toBe(true);
+    expect(isSingleGeometrySelection({geometryNum: 1, trailNum: 0, titleNum: 0}, 1)).toBe(true);
+  });
+
+  it('rejects when counts report more than one geometry', () => {
+    expect(isSingleGeometrySelection({geometryNum: 2}, 1)).toBe(false);
+    expect(isSingleGeometrySelection({}, 1)).toBe(false);
+  });
+
+  it('rejects when the geometry list disagrees with the counts', () => {
+    expect(isSingleGeometrySelection({geometryNum: 1}, 2)).toBe(false);
+  });
+
+  it.each([
+    'trailNum', 'titleNum', 'bitmapNum', 'normalTextBoxNum', 'digestTextBoxNum',
+    'digestTextBoxEditableNum', 'trailLinkNum', 'textLinkNum', 'todoLinkNum',
+  ])('rejects a mixed selection with %s > 0', field => {
+    expect(isSingleGeometrySelection({geometryNum: 1, [field]: 1}, 1)).toBe(false);
+  });
+
+  it('ignores geometry subtype counts', () => {
+    expect(
+      isSingleGeometrySelection({geometryNum: 1, circleNum: 1, ellipseNum: 1, straightLineNum: 1}, 1),
+    ).toBe(true);
+  });
+
+  it('treats non-number fields as absent', () => {
+    expect(isSingleGeometrySelection({geometryNum: 1, trailNum: 'x'}, 1)).toBe(true);
+  });
+});
+
+describe('resizeGeometryTo (#17)', () => {
+  const pen = {penColor: 0x9d, penType: 10, penWidth: 400};
+  const square: Geometry = {
+    type: 'GEO_polygon', ...pen,
+    points: [{x: 0, y: 0}, {x: 100, y: 0}, {x: 100, y: 100}, {x: 0, y: 100}, {x: 0, y: 0}],
+  };
+  const circle: Geometry = {
+    type: 'GEO_circle', ...pen,
+    ellipseCenterPoint: {x: 500, y: 500},
+    ellipseMajorAxisRadius: 100, ellipseMinorAxisRadius: 100, ellipseAngle: 0,
+  };
+
+  it('AC5.2: maps a polygon exactly onto the target', () => {
+    const target: Rect = {left: 50, top: 60, right: 450, bottom: 160};
+    expectRectClose(geometryNaturalBounds(resizeGeometryTo(square, target)!)!, target);
+  });
+
+  it('AC5.2: scales an ellipse per axis', () => {
+    const ellipse: Geometry = {...circle, type: 'GEO_ellipse', ellipseMajorAxisRadius: 120, ellipseMinorAxisRadius: 60};
+    const out = resizeGeometryTo(ellipse, {left: 0, top: 0, right: 480, bottom: 60})!;
+    expect(out.type).toBe('GEO_ellipse');
+    expect(out.ellipseMajorAxisRadius).toBeCloseTo(240, 6);
+    expect(out.ellipseMinorAxisRadius).toBeCloseTo(30, 6);
+    expect(out.ellipseCenterPoint).toEqual({x: 240, y: 30});
+  });
+
+  it('AC5.3: an unevenly stretched circle becomes an ellipse', () => {
+    const out = resizeGeometryTo(circle, {left: 0, top: 0, right: 400, bottom: 100})!;
+    expect(out.type).toBe('GEO_ellipse');
+    expect(out.ellipseMajorAxisRadius).toBeCloseTo(200, 6);
+    expect(out.ellipseMinorAxisRadius).toBeCloseTo(50, 6);
+  });
+
+  it('AC5.3: a uniformly stretched circle stays a circle', () => {
+    const out = resizeGeometryTo(circle, {left: 0, top: 0, right: 300, bottom: 300})!;
+    expect(out.type).toBe('GEO_circle');
+    expect(out.ellipseMajorAxisRadius).toBeCloseTo(150, 6);
+  });
+
+  it('AC5.3: sub-epsilon float noise does not flip a circle to an ellipse', () => {
+    const out = resizeGeometryTo(circle, {left: 0, top: 0, right: 1000, bottom: 1000 + 1e-7})!;
+    expect(out.ellipseMajorAxisRadius).not.toBe(out.ellipseMinorAxisRadius);
+    expect(out.type).toBe('GEO_circle');
+  });
+
+  it('AC5.2: preserves pen props and unknown extras', () => {
+    const g: Geometry = {...square, extra: 'kept'};
+    const out = resizeGeometryTo(g, {left: 0, top: 0, right: 10, bottom: 20})!;
+    expect(out).toMatchObject({...pen, extra: 'kept', type: 'GEO_polygon'});
+  });
+
+  it('maps a diagonal straight line into the target', () => {
+    const line: Geometry = {type: 'straightLine', ...pen, points: [{x: 0, y: 0}, {x: 10, y: 10}]};
+    expect(resizeGeometryTo(line, {left: 100, top: 100, right: 300, bottom: 150})!.points)
+      .toEqual([{x: 100, y: 100}, {x: 300, y: 150}]);
+  });
+
+  it.each([
+    ['an unknown type', {type: 'GEO_mystery', ...pen} as Geometry],
+    ['a malformed ellipse', {type: 'GEO_ellipse', ...pen} as Geometry],
+  ])('AC5.4: returns null for %s', (_label, g) => {
+    expect(resizeGeometryTo(g, {left: 0, top: 0, right: 10, bottom: 10})).toBeNull();
+  });
+
+  it.each([
+    ['non-finite', {left: 0, top: 0, right: NaN, bottom: 10}],
+    ['inverted horizontally', {left: 10, top: 0, right: 0, bottom: 10}],
+    ['inverted vertically', {left: 0, top: 10, right: 10, bottom: 0}],
+  ])('AC5.4: returns null for a %s target', (_label, target) => {
+    expect(resizeGeometryTo(square, target as Rect)).toBeNull();
+  });
+
+  it('AC5.4: never mutates its input', () => {
+    const snapshot = JSON.stringify(circle);
+    resizeGeometryTo(circle, {left: 0, top: 0, right: 400, bottom: 100});
+    expect(JSON.stringify(circle)).toBe(snapshot);
   });
 });

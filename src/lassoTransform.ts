@@ -234,3 +234,73 @@ export function bakeLassoResize(g: Geometry, lassoRect: Rect | null, tol?: numbe
   if (boundsMatch(natural, lassoRect, effectiveTol)) {return g;}
   return applyRectTransform(g, natural, lassoRect);
 }
+
+/**
+ * Loose view of sn-plugin-lib's `LassoElementTypeNum`. The firmware may
+ * omit fields, so every value is checked before use.
+ */
+export type LassoCounts = Readonly<Record<string, unknown>>;
+
+/** Element kinds that make a lasso selection more than "one shape". */
+const NON_GEOMETRY_COUNT_FIELDS = [
+  'trailNum',
+  'titleNum',
+  'bitmapNum',
+  'normalTextBoxNum',
+  'digestTextBoxNum',
+  'digestTextBoxEditableNum',
+  'trailLinkNum',
+  'textLinkNum',
+  'todoLinkNum',
+] as const;
+
+/**
+ * True when the lasso holds exactly one geometry and nothing else (#17).
+ *
+ * `geometryCount` is the length of `getLassoGeometries()`; `counts` is
+ * `getLassoElementTypeCounts()`. When the counts call failed (null) the
+ * rule degrades to the geometry list alone. Otherwise `geometryNum` must
+ * be 1 and every non-geometry kind 0 or absent — a mixed selection is
+ * refused rather than stretching only its geometry against a box the
+ * user drew around several things. Geometry subtype counts
+ * (`straightLineNum`, `circleNum`, `ellipseNum`) are ignored.
+ * DEVICE-UNVERIFIED: that a lone shape reports `trailNum` 0.
+ */
+export function isSingleGeometrySelection(counts: LassoCounts | null, geometryCount: number): boolean {
+  if (geometryCount !== 1) {return false;}
+  if (!counts) {return true;}
+  if (counts.geometryNum !== 1) {return false;}
+  return NON_GEOMETRY_COUNT_FIELDS.every(k => {
+    const v = counts[k];
+    return typeof v !== 'number' || v === 0;
+  });
+}
+
+function isFiniteRect(r: Rect): boolean {
+  return [r.left, r.top, r.right, r.bottom].every(Number.isFinite);
+}
+
+/**
+ * Stretch `g` so its stored natural bounds land exactly on `target` (#17).
+ *
+ * The remap is absolute, so a pending native lasso resize needs no
+ * baking: `modifyLassoGeometry` with the new coordinates replaces it. A
+ * circle stretched unevenly becomes a `GEO_ellipse` (same fields, Major
+ * and Minor radii diverge); the relative tolerance keeps float noise on
+ * large radii from flipping the type. Pen props and every other
+ * non-coordinate field are preserved; the input is never mutated.
+ *
+ * Returns null when the bounds cannot be determined (unknown type or
+ * malformed geometry) or the target is non-finite or inverted.
+ */
+export function resizeGeometryTo(g: Geometry, target: Rect): Geometry | null {
+  const natural = geometryNaturalBounds(g);
+  if (!natural || !isFiniteRect(target)) {return null;}
+  if (target.right < target.left || target.bottom < target.top) {return null;}
+  const out = applyRectTransform(g, natural, target);
+  if (out.type !== 'GEO_circle') {return out;}
+  const major = out.ellipseMajorAxisRadius as number;
+  const minor = out.ellipseMinorAxisRadius as number;
+  const uneven = Math.abs(major - minor) > EPSILON * Math.max(major, minor);
+  return uneven ? {...out, type: 'GEO_ellipse'} : out;
+}
