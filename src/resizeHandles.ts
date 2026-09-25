@@ -11,12 +11,16 @@
  * The one subtle rule is where the handles start. `getLassoGeometries()`
  * returns the shape's *stored* coordinates, while `getLassoRect()` is the
  * *visual* box: stored bounds plus stroke padding, plus any native lasso
- * resize still pending in this lasso session. The handles open on the
- * stored bounds unless the lasso rect is further off than padding can
- * explain, in which case they open on the lasso rect inset by half the
- * padding bound. Either way the write is always stored → edited box, and
- * axis-aligned remaps compose, so a pending native resize is baked in
- * exactly and the padding estimate can never leak into the shape.
+ * resize or move still pending in this lasso session. The handles open on
+ * the stored bounds unless the lasso rect's size or centre is further off
+ * than padding can explain (`lassoShowsPendingEdit`); then they open on the
+ * lasso rect inset by half the padding bound. The write is always
+ * stored → edited box, and axis-aligned remaps compose, so a pending native
+ * edit is baked in. An unchanged Done writes nothing, so it is exact. After
+ * a native resize or move, though, the start box is an estimate, and a Done
+ * that moves only some sides may shift the untouched ones by the estimate
+ * error (at most about `tol / 2` minus the real padding, e.g. ~5 px at pen
+ * width 900).
  */
 import {
   applyRectTransform,
