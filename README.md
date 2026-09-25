@@ -19,6 +19,11 @@ A toolbar plugin for Supernote that lets you insert geometric shapes directly in
 <video src="https://github.com/user-attachments/assets/298211f3-0039-4edd-aee5-6f1259272cc2" controls muted playsinline width="720"></video>
 -->
 
+## What's New in v1.0.12
+
+  1. **Keep aspect ratio.** A new checkbox in the Shapes popup. Leave it unticked and a dragged shape stretches to fill the box you draw (as before); tick it and the shape keeps its proportions, scaled to fit inside the box and centred. Your choice is remembered while the plugin stays loaded.
+  2. **Free resize from the lasso.** Lasso a shape and tap **Shapes** in the lasso toolbar to get eight handles on it: corners stretch width and height freely, edges stretch one direction only, and dragging inside the box moves it. Lines get a handle on each end. Nothing changes until you tap **Done** in the small toolbar next to the shape; **Cancel** leaves it as it was. Unlike the native lasso handle, the aspect ratio is not locked and the stroke keeps the width you picked. See [Resizing a placed shape](#resizing-a-placed-shape).
+
 ## What's New in v1.0.5
 
   1. New "♡ Favorites" category, listed first in the carousel. Carousel cycles favorites → basic → arrows → flowchart → decorative → others; landing tab stays basic (so a fresh-install user doesn't open onto an empty grid), with favorites one ◀
@@ -88,6 +93,7 @@ src/
   ShapePalette.tsx   Unified Shapes popup (grid, preview, pickers)
   ShapeOptionsPanel.tsx  Edit Shape (lasso toolbar: resize handles)
   ResizeHandlesOverlay.tsx  Resize handles UI (box, handles, Cancel / Done)
+  resizeHandles.ts   Resize handle geometry (hit-testing, drags, toolbar placement)
   StrokePreview.tsx  Live preview panel
 assets/
   icon.png           Toolbar icon
