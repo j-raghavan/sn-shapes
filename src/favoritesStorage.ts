@@ -64,9 +64,9 @@ const SCHEMA_VERSION = 1 as const;
  * Minimal duck-typed shape of the bits of AsyncStorage we use. Defining
  * it here means we don't import the real type (which would force the
  * dep to exist at compile time) and gives the in-memory backend a
- * clean target to mimic.
+ * clean target to mimic. Exported so preferencesStorage.ts shares it.
  */
-type KvBackend = {
+export type KvBackend = {
   getItem: (key: string) => Promise<string | null>;
   setItem: (key: string, value: string) => Promise<void>;
 };
@@ -75,9 +75,9 @@ type KvBackend = {
  * Lazy `require` so the absence of @react-native-async-storage/async-storage
  * downgrades gracefully to in-memory. Wrapped in a function so the
  * resolution happens once at storage-creation time, not on every load /
- * save call.
+ * save call. Exported so preferencesStorage.ts reuses the same resolution.
  */
-function tryLoadAsyncStorage(): KvBackend | null {
+export function tryLoadAsyncStorage(): KvBackend | null {
   try {
     const mod = require('@react-native-async-storage/async-storage');
     const candidate = mod?.default ?? mod;
