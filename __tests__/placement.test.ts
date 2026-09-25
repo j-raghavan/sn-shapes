@@ -5,6 +5,7 @@
  */
 import {
   DRAG_THRESHOLD_PX,
+  fitRectUniform,
   isDragGesture,
   MIN_DRAG_SIDE_PX,
   PageSize,
@@ -264,5 +265,93 @@ describe('placeGeometry — drag (FR1.5)', () => {
     placeGeometry(g, drag({left: 0, top: 0, right: 10, bottom: 10}), PAGE);
     placeGeometry(g, {kind: 'tap', point: {x: 5, y: 5}}, PAGE);
     expect(JSON.stringify(g)).toBe(snapshot);
+  });
+});
+
+describe('keepAspect (#17, SPEC-FREE-RESIZE FR1)', () => {
+  const aspect = (r: Rect) => (r.right - r.left) / (r.bottom - r.top);
+
+  it('fitRectUniform: a wide box is height-limited and centred horizontally', () => {
+    const natural: Rect = {left: 0, top: 0, right: 100, bottom: 100};
+    expectRectClose(
+      fitRectUniform(natural, {left: 0, top: 0, right: 600, bottom: 200}),
+      {left: 200, top: 0, right: 400, bottom: 200},
+    );
+  });
+
+  it('fitRectUniform: a tall box is width-limited and centred vertically', () => {
+    const natural: Rect = {left: 10, top: 10, right: 60, bottom: 110};
+    expectRectClose(
+      fitRectUniform(natural, {left: 100, top: 100, right: 200, bottom: 600}),
+      {left: 100, top: 250, right: 200, bottom: 450},
+    );
+  });
+
+  it('fitRectUniform: a box with the same proportions is returned as-is', () => {
+    const box: Rect = {left: 5, top: 5, right: 405, bottom: 205};
+    expectRectClose(fitRectUniform({left: 0, top: 0, right: 20, bottom: 10}, box), box);
+  });
+
+  it.each([
+    ['zero height', {left: 0, top: 5, right: 100, bottom: 5}],
+    ['zero width', {left: 5, top: 0, right: 5, bottom: 100}],
+    ['non-finite', {left: 0, top: 0, right: NaN, bottom: 10}],
+  ])('AC1.4: fitRectUniform returns the box for a %s natural rect', (_label, natural) => {
+    const box: Rect = {left: 1, top: 2, right: 3, bottom: 4};
+    expect(fitRectUniform(natural as Rect, box)).toBe(box);
+  });
+
+  it('AC1.2: a square rectangle dragged into 600×200 stays 200×200, centred', () => {
+    const g = buildDefault('rectangle');
+    const rect: Rect = {left: 100, top: 100, right: 700, bottom: 300};
+    const out = placeGeometry(g, drag(rect), PAGE, {keepAspect: true});
+    expectRectClose(geometryNaturalBounds(out), {left: 300, top: 100, right: 500, bottom: 300});
+  });
+
+  it('AC1.1: without keepAspect the drag still fills the box (3-arg, {} and false agree)', () => {
+    const g = buildDefault('rectangle');
+    const rect: Rect = {left: 100, top: 100, right: 700, bottom: 300};
+    const threeArg = placeGeometry(g, drag(rect), PAGE);
+    expectRectClose(geometryNaturalBounds(threeArg), rect);
+    expect(placeGeometry(g, drag(rect), PAGE, {})).toEqual(threeArg);
+    expect(placeGeometry(g, drag(rect), PAGE, {keepAspect: false})).toEqual(threeArg);
+  });
+
+  it('AC1.2: an ellipse keeps its radius ratio', () => {
+    const g = buildDefault('ellipse');
+    const ratio = g.ellipseMajorAxisRadius! / g.ellipseMinorAxisRadius!;
+    const out = placeGeometry(
+      g, drag({left: 0, top: 0, right: 900, bottom: 100}), PAGE, {keepAspect: true},
+    );
+    expect(out.ellipseMajorAxisRadius! / out.ellipseMinorAxisRadius!).toBeCloseTo(ratio, 6);
+  });
+
+  it.each(SHAPES.filter(s => s.id !== 'line' && s.id !== 'circle').map(s => s.id))(
+    'AC1.2: %s keeps its aspect and fits inside a 500×300 box',
+    id => {
+      const g = buildDefault(id);
+      const box: Rect = {left: 100, top: 100, right: 600, bottom: 400};
+      const built = geometryNaturalBounds(g)!;
+      const out = geometryNaturalBounds(placeGeometry(g, drag(box), PAGE, {keepAspect: true}))!;
+      expect(aspect(out)).toBeCloseTo(aspect(built), 4);
+      expect(out.left).toBeGreaterThanOrEqual(box.left - 1e-6);
+      expect(out.right).toBeLessThanOrEqual(box.right + 1e-6);
+      expect(out.top).toBeGreaterThanOrEqual(box.top - 1e-6);
+      expect(out.bottom).toBeLessThanOrEqual(box.bottom + 1e-6);
+      expect((out.left + out.right) / 2).toBeCloseTo(350, 6);
+      expect((out.top + out.bottom) / 2).toBeCloseTo(250, 6);
+    },
+  );
+
+  it('AC1.3: circles, lines and taps are unaffected by keepAspect', () => {
+    const box: Rect = {left: 100, top: 200, right: 400, bottom: 300};
+    for (const id of ['circle', 'line']) {
+      const g = buildDefault(id);
+      expect(placeGeometry(g, drag(box), PAGE, {keepAspect: true}))
+        .toEqual(placeGeometry(g, drag(box), PAGE));
+    }
+    const g = buildDefault('rectangle');
+    const tap = {kind: 'tap' as const, point: {x: 400, y: 600}};
+    expect(placeGeometry(g, tap, PAGE, {keepAspect: true})).toEqual(placeGeometry(g, tap, PAGE));
   });
 });
