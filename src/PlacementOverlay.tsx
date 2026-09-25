@@ -54,12 +54,13 @@ export type PlacementOverlayProps = {
 // Hoisted so the responder prop is referentially stable across renders.
 const claimResponder = () => true;
 
-function touchPoint(e: GestureResponderEvent): Point {
+/** The pen position of a responder event, in root-view dp. */
+export function touchPoint(e: GestureResponderEvent): Point {
   return {x: e.nativeEvent.pageX, y: e.nativeEvent.pageY};
 }
 
 /** Absolute-position style for a dp rect. */
-function boxStyle(r: Rect) {
+export function boxStyle(r: Rect) {
   return {left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top};
 }
 
